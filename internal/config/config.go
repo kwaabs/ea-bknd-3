@@ -59,7 +59,7 @@ func Load() *Config {
 
 	notifyEmails := parseEmailList(getEnv(
 		"NOTIFY_EMAILS",
-		"jdanso@ecggh.com,yoadofo@ecggh.com",
+		"jdanso@ecggh.com,yadofo@ecggh.com",
 	))
 
 	return &Config{

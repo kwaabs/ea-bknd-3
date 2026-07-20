@@ -13,7 +13,6 @@ import (
 	"bknd-3/internal/logger"
 	"bknd-3/internal/loginstats"
 	"bknd-3/internal/meters"
-	mdlwr "bknd-3/internal/middleware"
 	"bknd-3/internal/mmssales"
 	"bknd-3/internal/serviceareas"
 	"bknd-3/internal/services"
@@ -66,9 +65,6 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 	authSvc := services.NewAuthService(db, jwtMgr, cfg, logr)
 	meterMetricsSvc := services.NewMeterMetricsService(db)
 
-	// create the auth middleware instance (pass dependencies)
-	authMW := mdlwr.NewAuthMiddleware(cfg.JWTPublicKeyPath, authSvc, logr.Logger)
-
 	authHandler := handlers.NewAuthHandler(authSvc, logr, cfg)
 	meterHandler := meters.NewHandler(meters.NewService(db), logr.Logger)
 	meterMetricsHandler := handlers.NewMeterMetricsHandler(meterMetricsSvc, logr.Logger)
@@ -84,24 +80,17 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 	r.Route("/api/v1", func(r chi.Router) {
 
 		r.Route("/auth", func(r chi.Router) {
-			// Public routes
+			// Public routes — refresh/logout use the refresh cookie (or body),
+			// not the short-lived access JWT, so they must stay unauthenticated.
 			r.Post("/login", authHandler.LoginLocal)
 			r.Post("/ldap", authHandler.LoginLDAP)
-			r.Post("/azure", authHandler.LoginAzureAD) // 👈 add this
-
-			// Protected routes
-			r.Group(func(r chi.Router) {
-				// use the middleware instance's method as middleware
-				r.Use(authMW.JWTAuth)
-				r.Post("/refresh", authHandler.Refresh)
-				r.Post("/logout", authHandler.Logout)
-			})
+			r.Post("/azure", authHandler.LoginAzureAD)
+			r.Post("/refresh", authHandler.Refresh)
+			r.Post("/logout", authHandler.Logout)
 		})
 
 		r.Route("/meters", func(r chi.Router) {
-			//r.Use(authMW.JWTAuth) // protect with JWT
-
-			// In your router setup
+			// Basic meter operations (JWT protection can be re-enabled later)
 			r.Route("/metadata", func(r chi.Router) {
 				r.Get("/regions", meterHandler.GetRegions)
 				r.Get("/districts", meterHandler.GetDistricts)

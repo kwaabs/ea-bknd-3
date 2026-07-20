@@ -183,12 +183,13 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// clear cookie
+	secure := h.cfg.Environment == "production" || h.cfg.Environment == "prod"
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    "",
 		Expires:  time.Unix(0, 0),
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   secure,
 		Path:     "/",
 		SameSite: http.SameSiteLaxMode,
 	})
@@ -197,12 +198,13 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) setRefreshCookie(w http.ResponseWriter, token string, expires time.Time) {
+	secure := h.cfg.Environment == "production" || h.cfg.Environment == "prod"
 	cookie := &http.Cookie{
 		Name:     "refresh_token",
 		Value:    token,
 		Expires:  expires,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   secure, // Secure cookies are dropped on http://localhost
 		Path:     "/",
 		SameSite: http.SameSiteLaxMode,
 	}

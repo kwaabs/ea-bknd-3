@@ -2,6 +2,7 @@ package routes
 
 import (
 	"bknd-3/internal/amrcustomer"
+	"bknd-3/internal/announcements"
 	"bknd-3/internal/auth"
 	"bknd-3/internal/cache"
 	"bknd-3/internal/comments"
@@ -10,8 +11,9 @@ import (
 	"bknd-3/internal/feeders"
 	"bknd-3/internal/handlers"
 	"bknd-3/internal/logger"
-	mdlwr "bknd-3/internal/middleware"
+	"bknd-3/internal/loginstats"
 	"bknd-3/internal/meters"
+	mdlwr "bknd-3/internal/middleware"
 	"bknd-3/internal/mmssales"
 	"bknd-3/internal/serviceareas"
 	"bknd-3/internal/services"
@@ -129,7 +131,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 				r.Get("/details", meterHandler.GetMeterStatusDetails)   // 25 KB per page
 
 				// Keep existing for backward compatibility
-				r.Get("/", meterHandler.GetMeterStatus)          // DEPRECATED
+				r.Get("/", meterHandler.GetMeterStatus)             // DEPRECATED
 				r.Get("/counts", meterHandler.GetMeterStatusCounts) // DEPRECATED
 			})
 
@@ -209,6 +211,8 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 		})
 
 		r.Mount("/comments", comments.Routes(db, logr.Logger))
+		r.Mount("/announcements", announcements.Routes(db, cfg, logr.Logger))
+		r.Mount("/admin/login-stats", loginstats.Routes(db, logr.Logger))
 		r.Mount("/service-areas", serviceareas.Routes(db, logr.Logger))
 		r.Mount("/amr", amrcustomer.Routes(db, logr.Logger))
 

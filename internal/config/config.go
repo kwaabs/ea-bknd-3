@@ -31,6 +31,10 @@ type Config struct {
 	// CORS - Add this
 	AllowedOrigins []string
 
+	// Emails allowed to post dashboard marquee announcements (and related notify features).
+	// Comma-separated via NOTIFY_EMAILS; defaults match the frontend allowlist.
+	NotifyEmails []string
+
 	// Redis cache
 	RedisURL      string        // empty disables caching
 	CacheTTLShort time.Duration // volatile ranges (include today)
@@ -53,6 +57,11 @@ func Load() *Config {
 		",",
 	)
 
+	notifyEmails := parseEmailList(getEnv(
+		"NOTIFY_EMAILS",
+		"jdanso@ecggh.com,yoadofo@ecggh.com",
+	))
+
 	return &Config{
 		Port:              getEnv("APP_PORT", "8780"),
 		DatabaseURL:       getEnv("DATABASE_URL", "postgres://postgres:password@localhost:5432/ea-5?sslmode=disable"),
@@ -68,11 +77,24 @@ func Load() *Config {
 		LDAPBindPass:   getEnv("LDAP_BIND_PASS", ""),
 		LDAPBaseDN:     getEnv("LDAP_BASE_DN", ""),
 		AllowedOrigins: allowedOrigins, // Add this
+		NotifyEmails:   notifyEmails,
 
 		RedisURL:      getEnv("REDIS_URL", ""),
 		CacheTTLShort: time.Duration(cacheTTLShortSec) * time.Second,
 		CacheTTLLong:  time.Duration(cacheTTLLongSec) * time.Second,
 	}
+}
+
+func parseEmailList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		email := strings.TrimSpace(strings.ToLower(p))
+		if email != "" {
+			out = append(out, email)
+		}
+	}
+	return out
 }
 
 func getEnv(key, fallback string) string {

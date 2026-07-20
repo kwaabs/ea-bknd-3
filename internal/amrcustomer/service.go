@@ -157,6 +157,12 @@ func buildAmrFilters(params AmrReadingFilterParams) []AmrFilter {
 			Args:  []interface{}{bun.In(amrStringsToLower(params.ServiceType))},
 		})
 	}
+	if len(params.SLTType) > 0 {
+		filters = append(filters, AmrFilter{
+			Query: "LOWER(acr.slt_type) IN (?)",
+			Args:  []interface{}{bun.In(amrStringsToLower(params.SLTType))},
+		})
+	}
 	if len(params.AccountNo) > 0 {
 		filters = append(filters, AmrFilter{
 			Query: "acr.account_no_ IN (?)",
@@ -334,6 +340,7 @@ func (s *Service) GetAggregatedConsumption(
 				accounttype,
 				contractstatus,
 				servicetype,
+				slt_type,
 				multiply_factor
 			FROM app.amr_customer_records
 			WHERE meter_number IS NOT NULL
@@ -350,7 +357,7 @@ func (s *Service) GetAggregatedConsumption(
 	subQ := s.db.NewSelect().
 		TableExpr(`(
 			SELECT DISTINCT ON (meter_number) meter_number, region, district, community,
-				tariffclassname, customertype, contractstatus, servicetype
+				tariffclassname, customertype, contractstatus, servicetype, slt_type
 			FROM app.amr_customer_records
 			WHERE meter_number IS NOT NULL
 			ORDER BY meter_number, id
@@ -377,6 +384,9 @@ func (s *Service) GetAggregatedConsumption(
 	}
 	if len(params.ServiceType) > 0 {
 		subQ = subQ.Where("LOWER(acr2.servicetype) IN (?)", bun.In(amrStringsToLower(params.ServiceType)))
+	}
+	if len(params.SLTType) > 0 {
+		subQ = subQ.Where("LOWER(acr2.slt_type) IN (?)", bun.In(amrStringsToLower(params.SLTType)))
 	}
 
 	q = q.ColumnExpr("(?) AS total_meter_count", subQ)
@@ -408,14 +418,21 @@ func (s *Service) GetAggregatedConsumption(
 		"accounttype":    "acr.accounttype",
 		"contractstatus": "acr.contractstatus",
 		"servicetype":    "acr.servicetype",
+		"slt_type":       "acr.slt_type",
+		"slttype":        "acr.slt_type",
 	}
 
 	for _, g := range additionalGroups {
-		col, ok := validAdditional[strings.ToLower(g)]
+		key := strings.ToLower(g)
+		col, ok := validAdditional[key]
 		if !ok {
 			continue
 		}
-		q = q.ColumnExpr(col + " AS " + g)
+		alias := key
+		if key == "slttype" {
+			alias = "slt_type"
+		}
+		q = q.ColumnExpr(col + " AS " + alias)
 		groupCols = append(groupCols, bun.Safe(col))
 	}
 

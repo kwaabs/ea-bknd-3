@@ -1484,8 +1484,9 @@ func (s *Service) GetExpressFeederDailyConsumption(
 		ColumnExpr("f.sending_station AS sending_station").
 		ColumnExpr("f.sending_type_of_station AS sending_type_of_station").
 		ColumnExpr("f.sending_code AS sending_code").
-		ColumnExpr("f.sending_region AS sending_region").
-		ColumnExpr("f.sending_district AS sending_district").
+		// Fall back to the joined meter region when express_feeders denormalized fields are blank
+		ColumnExpr("COALESCE(NULLIF(TRIM(f.sending_region), ''), sm.region) AS sending_region").
+		ColumnExpr("COALESCE(NULLIF(TRIM(f.sending_district), ''), sm.district) AS sending_district").
 		ColumnExpr("rm.meter_number AS receiving_meter_number").
 		ColumnExpr("rm.meter_type AS receiving_meter_type").
 		ColumnExpr("rm.multiply_factor::text AS receiving_multiply_factor").
@@ -1493,16 +1494,16 @@ func (s *Service) GetExpressFeederDailyConsumption(
 		ColumnExpr("f.receiving_station AS receiving_station").
 		ColumnExpr("f.receiving_type_of_station AS receiving_type_of_station").
 		ColumnExpr("f.receiving_code AS receiving_code").
-		ColumnExpr("f.receiving_region AS receiving_region").
-		ColumnExpr("f.receiving_district AS receiving_district").
+		ColumnExpr("COALESCE(NULLIF(TRIM(f.receiving_region), ''), rm.region) AS receiving_region").
+		ColumnExpr("COALESCE(NULLIF(TRIM(f.receiving_district), ''), rm.district) AS receiving_district").
 		ColumnExpr("sdim.system_name AS sending_system_name").
 		ColumnExpr("rdim.system_name AS receiving_system_name").
 		ColumnExpr("ROUND(SUM(smcd.consumption)::numeric, 4) AS sending_consumption").
 		ColumnExpr("ROUND(SUM(rmcd.consumption)::numeric, 4) AS receiving_consumption").
 		GroupExpr("DATE(COALESCE(smcd.consumption_date, rmcd.consumption_date))").
 		GroupExpr("f.feeder_name, f.sap_version, f.comments").
-		GroupExpr("sm.meter_number, sm.meter_type, sm.multiply_factor, sm.voltage_kv").
-		GroupExpr("rm.meter_number, rm.meter_type, rm.multiply_factor, rm.voltage_kv").
+		GroupExpr("sm.meter_number, sm.meter_type, sm.multiply_factor, sm.voltage_kv, sm.region, sm.district").
+		GroupExpr("rm.meter_number, rm.meter_type, rm.multiply_factor, rm.voltage_kv, rm.region, rm.district").
 		GroupExpr("f.sending_station, f.sending_type_of_station, f.sending_code, f.sending_region, f.sending_district").
 		GroupExpr("f.receiving_station, f.receiving_type_of_station, f.receiving_code, f.receiving_region, f.receiving_district").
 		GroupExpr("sdim.system_name, rdim.system_name").
@@ -1681,13 +1682,14 @@ func (s *Service) GetExpressFeederAggregatedConsumption(
 		ColumnExpr("f.sending_station AS sending_station").
 		ColumnExpr("f.sending_type_of_station AS sending_type_of_station").
 		ColumnExpr("f.sending_code AS sending_code").
-		ColumnExpr("f.sending_region AS sending_region").
-		ColumnExpr("f.sending_district AS sending_district").
+		// Fall back to the joined meter region when express_feeders denormalized fields are blank
+		ColumnExpr("COALESCE(NULLIF(TRIM(f.sending_region), ''), sm.region) AS sending_region").
+		ColumnExpr("COALESCE(NULLIF(TRIM(f.sending_district), ''), sm.district) AS sending_district").
 		ColumnExpr("f.receiving_station AS receiving_station").
 		ColumnExpr("f.receiving_type_of_station AS receiving_type_of_station").
 		ColumnExpr("f.receiving_code AS receiving_code").
-		ColumnExpr("f.receiving_region AS receiving_region").
-		ColumnExpr("f.receiving_district AS receiving_district").
+		ColumnExpr("COALESCE(NULLIF(TRIM(f.receiving_region), ''), rm.region) AS receiving_region").
+		ColumnExpr("COALESCE(NULLIF(TRIM(f.receiving_district), ''), rm.district) AS receiving_district").
 		ColumnExpr("sdim.system_name AS sending_system_name").
 		ColumnExpr("rdim.system_name AS receiving_system_name").
 		ColumnExpr("ROUND(SUM(smcd.consumption)::numeric, 4) AS sending_consumption").
@@ -1695,7 +1697,7 @@ func (s *Service) GetExpressFeederAggregatedConsumption(
 		GroupExpr(periodExpr).
 		GroupExpr("f.feeder_name, f.sap_version").
 		GroupExpr("sm.meter_number, rm.meter_number").
-		GroupExpr("sm.meter_type, rm.meter_type").
+		GroupExpr("sm.meter_type, rm.meter_type, sm.region, sm.district, rm.region, rm.district").
 		GroupExpr("f.sending_station, f.sending_type_of_station, f.sending_code, f.sending_region, f.sending_district").
 		GroupExpr("f.receiving_station, f.receiving_type_of_station, f.receiving_code, f.receiving_region, f.receiving_district").
 		GroupExpr("sdim.system_name, rdim.system_name").

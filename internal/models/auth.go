@@ -20,6 +20,21 @@ type User struct {
 	LastLoginAt   *time.Time `json:"last_login_at" bun:",nullzero"` // Add nullzero tag
 }
 
+// LoginEvent is an append-only record of a successful login. Never updated
+// or deleted, unlike RefreshToken (session-capped) or User.LastLoginAt
+// (overwritten each time) — this is what login frequency/history queries
+// are computed from.
+type LoginEvent struct {
+	bun.BaseModel `bun:"table:app.login_events"`
+	ID            uuid.UUID `bun:",pk,type:uuid" json:"id"`
+	UserID        uuid.UUID `bun:"type:uuid,notnull" json:"user_id"`
+	Email         string    `bun:",notnull" json:"email"`
+	Name          string    `json:"name"`
+	Provider      string    `bun:",notnull" json:"provider"`
+	DeviceInfo    *string   `json:"device_info,omitempty"`
+	CreatedAt     time.Time `bun:",nullzero,notnull,default:current_timestamp" json:"created_at"`
+}
+
 type RefreshToken struct {
 	bun.BaseModel `bun:"table:app.refresh_tokens"`
 	ID            uuid.UUID `bun:",pk,type:uuid,default:uuid_generate_v4()" json:"id"`

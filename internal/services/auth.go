@@ -7,10 +7,10 @@ import (
 	model "bknd-3/internal/models"
 	"context"
 	"database/sql"
- "encoding/json"  // 👈 add this
+	"encoding/json" // 👈 add this
 	"fmt"
 	"go.uber.org/zap"
-	"net/http"       // 👈 add this
+	"net/http" // 👈 add this
 	"regexp"
 	"strings"
 	"time"
@@ -82,6 +82,7 @@ func (s *AuthService) LoginLocal(ctx context.Context, email, password, deviceInf
 		Set("last_login_at = ?", now).
 		Where("id = ?", u.ID).
 		Exec(ctx)
+	s.recordLoginEvent(ctx, u.ID, u.Email, u.Name, "local", deviceInfo)
 
 	pair, err := s.jwt.GenerateTokenPair(u.ID.String(), s.cfg.AccessTokenTTL, s.cfg.RefreshTokenTTL, u.TokenVersion, "local", u.Roles)
 	if err != nil {
@@ -254,6 +255,7 @@ func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceI
 		Set("last_login_at = ?", now).
 		Where("id = ?", u.ID).
 		Exec(ctx)
+	s.recordLoginEvent(ctx, u.ID, mail, fullName, "ldap", deviceInfo)
 
 	// Generate tokens
 	pair, err := s.jwt.GenerateTokenPair(
@@ -289,6 +291,23 @@ func (s *AuthService) LoginLDAP(ctx context.Context, ldapUser, ldapPass, deviceI
 		zap.String("username", cleanUsername))
 
 	return pair, userInfo, nil
+}
+
+// recordLoginEvent inserts a permanent login history row. Best-effort — a
+// failure here shouldn't fail the login itself.
+func (s *AuthService) recordLoginEvent(ctx context.Context, userID uuid.UUID, email, name, provider, deviceInfo string) {
+	ev := model.LoginEvent{
+		ID:         uuid.New(),
+		UserID:     userID,
+		Email:      email,
+		Name:       name,
+		Provider:   provider,
+		DeviceInfo: &deviceInfo,
+		CreatedAt:  time.Now().UTC(),
+	}
+	if _, err := s.db.NewInsert().Model(&ev).Exec(ctx); err != nil {
+		s.logr.Warn("failed to record login event", zap.Error(err), zap.String("email", email))
+	}
 }
 
 // storeRefreshToken stores a hashed refresh token and enforces max 2 sessions per user
@@ -416,99 +435,99 @@ func (s *AuthService) CheckTokenVersion(ctx context.Context, userID string, toke
 	return user.TokenVersion == tokenVersion, nil
 }
 
-
 // LoginAzureAD validates the Azure AD id_token and provisions/returns the user
 func (s *AuthService) LoginAzureAD(ctx context.Context, idToken string, accessToken string, deviceInfo string) (*auth.TokenPair, *UserInfo, error) {
-    // Validate the token by calling Microsoft's userinfo endpoint
-    req, err := http.NewRequestWithContext(ctx, "GET", "https://graph.microsoft.com/oidc/userinfo", nil)
-    if err != nil {
-        return nil, nil, fmt.Errorf("failed to create request")
-    }
-    req.Header.Set("Authorization", "Bearer "+accessToken) // 👈 changed from idToken
+	// Validate the token by calling Microsoft's userinfo endpoint
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://graph.microsoft.com/oidc/userinfo", nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create request")
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken) // 👈 changed from idToken
 
-    client := &http.Client{}
-    resp, err := client.Do(req)
-    if err != nil {
-        return nil, nil, fmt.Errorf("failed to validate token with Microsoft")
-    }
-    defer resp.Body.Close()
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to validate token with Microsoft")
+	}
+	defer resp.Body.Close()
 
-    if resp.StatusCode != http.StatusOK {
-        return nil, nil, fmt.Errorf("invalid or expired Azure AD token")
-    }
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("invalid or expired Azure AD token")
+	}
 
-    // Parse Microsoft user info
-    var msUser struct {
-        Sub   string `json:"sub"`
-        Email string `json:"email"`
-        Name  string `json:"name"`
-    }
-    if err := json.NewDecoder(resp.Body).Decode(&msUser); err != nil {
-        return nil, nil, fmt.Errorf("failed to parse Microsoft user info")
-    }
+	// Parse Microsoft user info
+	var msUser struct {
+		Sub   string `json:"sub"`
+		Email string `json:"email"`
+		Name  string `json:"name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&msUser); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse Microsoft user info")
+	}
 
-    if msUser.Email == "" {
-        return nil, nil, fmt.Errorf("email not provided by Azure AD")
-    }
+	if msUser.Email == "" {
+		return nil, nil, fmt.Errorf("email not provided by Azure AD")
+	}
 
-    // Provision or fetch user from DB (same pattern as LoginLDAP)
-    var u model.User
-    err = s.db.NewSelect().
-        Model(&u).
-        Column("id", "email", "provider", "name", "roles", "token_version", "created_at").
-        Where("email = ?", msUser.Email).
-        Scan(ctx)
+	// Provision or fetch user from DB (same pattern as LoginLDAP)
+	var u model.User
+	err = s.db.NewSelect().
+		Model(&u).
+		Column("id", "email", "provider", "name", "roles", "token_version", "created_at").
+		Where("email = ?", msUser.Email).
+		Scan(ctx)
 
-    if err != nil {
-        if err == sql.ErrNoRows {
-            u = model.User{
-                Email:    msUser.Email,
-                Provider: "azure",
-                Name:     msUser.Name,
-                Roles:    []string{"user"},
-            }
-            _, err = s.db.NewInsert().Model(&u).Exec(ctx)
-            if err != nil {
-                return nil, nil, fmt.Errorf("failed to create user account")
-            }
-            s.logr.Info("Created new Azure AD user", zap.String("email", msUser.Email))
-        } else {
-            return nil, nil, fmt.Errorf("database error")
-        }
-    }
+	if err != nil {
+		if err == sql.ErrNoRows {
+			u = model.User{
+				Email:    msUser.Email,
+				Provider: "azure",
+				Name:     msUser.Name,
+				Roles:    []string{"user"},
+			}
+			_, err = s.db.NewInsert().Model(&u).Exec(ctx)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to create user account")
+			}
+			s.logr.Info("Created new Azure AD user", zap.String("email", msUser.Email))
+		} else {
+			return nil, nil, fmt.Errorf("database error")
+		}
+	}
 
-    // Update last login
-    now := time.Now().UTC()
-    _, _ = s.db.NewUpdate().
-        TableExpr("app.users").
-        Set("last_login_at = ?", now).
-        Where("id = ?", u.ID).
-        Exec(ctx)
+	// Update last login
+	now := time.Now().UTC()
+	_, _ = s.db.NewUpdate().
+		TableExpr("app.users").
+		Set("last_login_at = ?", now).
+		Where("id = ?", u.ID).
+		Exec(ctx)
+	s.recordLoginEvent(ctx, u.ID, msUser.Email, msUser.Name, "azure", deviceInfo)
 
-    // Generate tokens
-    pair, err := s.jwt.GenerateTokenPair(
-        u.ID.String(),
-        s.cfg.AccessTokenTTL,
-        s.cfg.RefreshTokenTTL,
-        u.TokenVersion,
-        "azure",
-        u.Roles,
-    )
-    if err != nil {
-        return nil, nil, fmt.Errorf("failed to generate tokens")
-    }
+	// Generate tokens
+	pair, err := s.jwt.GenerateTokenPair(
+		u.ID.String(),
+		s.cfg.AccessTokenTTL,
+		s.cfg.RefreshTokenTTL,
+		u.TokenVersion,
+		"azure",
+		u.Roles,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate tokens")
+	}
 
-    if err := s.storeRefreshToken(ctx, u.ID, pair.RefreshToken, pair.RefreshExp, pair.JTI, deviceInfo); err != nil {
-        return nil, nil, fmt.Errorf("failed to store session")
-    }
+	if err := s.storeRefreshToken(ctx, u.ID, pair.RefreshToken, pair.RefreshExp, pair.JTI, deviceInfo); err != nil {
+		return nil, nil, fmt.Errorf("failed to store session")
+	}
 
-    userInfo := &UserInfo{
-        ID:       u.ID.String(),
-        Email:    msUser.Email,
-        Name:     msUser.Name,
-        Provider: "azure",
-        Roles:    u.Roles,
-    }
+	userInfo := &UserInfo{
+		ID:       u.ID.String(),
+		Email:    msUser.Email,
+		Name:     msUser.Name,
+		Provider: "azure",
+		Roles:    u.Roles,
+	}
 
-    return pair, userInfo, nil
+	return pair, userInfo, nil
 }

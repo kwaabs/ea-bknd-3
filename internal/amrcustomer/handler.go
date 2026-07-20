@@ -61,6 +61,7 @@ func buildAmrFilterParams(r *http.Request, dateFrom, dateTo time.Time) AmrReadin
 		AccountType:    amrSplitCSV(q.Get("accountType")),
 		ContractStatus: amrSplitCSV(q.Get("contractStatus")),
 		ServiceType:    amrSplitCSV(q.Get("serviceType")),
+		SLTType:        amrSplitCSV(q.Get("sltType")),
 		AccountNo:      amrSplitCSV(q.Get("accountNo")),
 		SPN:            amrSplitCSV(q.Get("spn")),
 	}

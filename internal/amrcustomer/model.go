@@ -45,6 +45,7 @@ type AmrReadingFilterParams struct {
 	AccountType    []string
 	ContractStatus []string
 	ServiceType    []string
+	SLTType        []string
 	AccountNo      []string
 	SPN            []string
 	DateFrom       time.Time
@@ -130,6 +131,7 @@ type AmrAggregatedConsumptionResult struct {
 	Community        *string   `bun:"community" json:"community,omitempty"`
 	TariffClass      *string   `bun:"tariff_class" json:"tariff_class,omitempty"`
 	CustomerType     *string   `bun:"customer_type" json:"customer_type,omitempty"`
+	SLTType          *string   `bun:"slt_type" json:"slt_type,omitempty"`
 	TotalConsumption float64   `bun:"total_consumption" json:"total_consumption"`
 	ActiveMeters     int       `bun:"active_meters" json:"active_meters"`
 	TotalMeterCount  int       `bun:"total_meter_count" json:"total_meter_count"`

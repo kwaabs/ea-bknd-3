@@ -127,33 +127,53 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshReq
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	// prefer cookie if present
-	cookie, err := r.Cookie("refresh_token")
-	if err == nil && cookie.Value != "" {
-		req.RefreshToken = cookie.Value
+	bodyToken := req.RefreshToken
+	cookieToken := ""
+	if cookie, err := r.Cookie("refresh_token"); err == nil {
+		cookieToken = cookie.Value
 	}
 
-	if req.RefreshToken == "" {
+	// Prefer the body token (frontend localStorage) over the cookie.
+	// Cookie can lag behind after rotation and would then kill a still-valid session.
+	candidates := make([]string, 0, 2)
+	if bodyToken != "" {
+		candidates = append(candidates, bodyToken)
+	}
+	if cookieToken != "" && cookieToken != bodyToken {
+		candidates = append(candidates, cookieToken)
+	}
+
+	if len(candidates) == 0 {
 		http.Error(w, "refresh token required", http.StatusBadRequest)
 		return
 	}
 
-	pair, err := h.authSvc.Refresh(r.Context(), req.RefreshToken, req.DeviceInfo)
-	if err != nil {
-		h.logr.Warn("refresh failed", zap.Error(err))
-		http.Error(w, "invalid refresh token", http.StatusUnauthorized)
+	var lastErr error
+	for i, token := range candidates {
+		pair, err := h.authSvc.Refresh(r.Context(), token, req.DeviceInfo)
+		if err != nil {
+			lastErr = err
+			h.logr.Warn("refresh candidate failed",
+				zap.Int("attempt", i+1),
+				zap.Error(err),
+			)
+			continue
+		}
+
+		h.setRefreshCookie(w, pair.RefreshToken, pair.RefreshExp)
+		resp := tokenResp{
+			AccessToken:  pair.AccessToken,
+			RefreshToken: pair.RefreshToken,
+			ExpiresAt:    pair.AccessExp,
+			User:         nil,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 		return
 	}
 
-	h.setRefreshCookie(w, pair.RefreshToken, pair.RefreshExp)
-	resp := tokenResp{
-		AccessToken:  pair.AccessToken,
-		RefreshToken: pair.RefreshToken,
-		ExpiresAt:    pair.AccessExp,
-		User:         nil, // No user info on refresh (token already has user claims)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	h.logr.Warn("refresh failed for all candidates", zap.Error(lastErr))
+	http.Error(w, "invalid refresh token", http.StatusUnauthorized)
 }
 
 // POST /auth/logout

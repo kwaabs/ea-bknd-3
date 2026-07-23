@@ -45,7 +45,7 @@ type Config struct {
 func Load() *Config {
 	_ = godotenv.Load()
 
-	accessTTLMin, _ := strconv.Atoi(getEnv("ACCESS_TOKEN_MINUTES", "15"))
+	accessTTLMin, _ := strconv.Atoi(getEnv("ACCESS_TOKEN_MINUTES", "60"))
 	refreshTTLDays, _ := strconv.Atoi(getEnv("REFRESH_TOKEN_DAYS", "10"))
 
 	cacheTTLShortSec, _ := strconv.Atoi(getEnv("CACHE_TTL_SHORT_SECONDS", "120"))   // 2m
@@ -69,7 +69,7 @@ func Load() *Config {
 		BunDebug:          getEnvAsBool("BUNDEBUG", false),
 		JWTPrivateKeyPath: getEnv("JWT_PRIVATE_KEY_PATH", "keys/jwt_private.pem"),
 		JWTPublicKeyPath:  getEnv("JWT_PUBLIC_KEY_PATH", "keys/jwt_public.pem"),
-		AccessTokenTTL:    time.Duration(accessTTLMin) * time.Minute,      // default 15m
+		AccessTokenTTL:    time.Duration(accessTTLMin) * time.Minute,      // default 60m
 		RefreshTokenTTL:   time.Duration(refreshTTLDays) * 24 * time.Hour, // default 10d
 		//LDAPServer:        getEnv("LDAP_SERVER", "ldap://ldap.example.com:389"),
 		LDAPServer:     getEnv("LDAP_SERVER", "ldap://localhost:10389"),

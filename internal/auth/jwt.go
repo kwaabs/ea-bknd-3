@@ -107,7 +107,8 @@ func (m *JWTManager) GenerateTokenPair(userID string, accessTTL, refreshTTL time
 		RefreshToken: refreshToken,
 		AccessExp:    accessExp,
 		RefreshExp:   refreshExp,
-		JTI:          jti,
+		// Must be the refresh token's jti — storeRefreshToken / Refresh lookup by this value.
+		JTI: refreshJTI,
 	}, nil
 }
 

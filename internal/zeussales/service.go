@@ -53,13 +53,36 @@ func (s *Service) base(p FilterParams) *bun.SelectQuery {
 	return q
 }
 
+// Whitelisted sort columns for Detail. Keys are query-param values.
+var detailSortCols = map[string]string{
+	"lastbilldate":        "lastbilldate",
+	"lastbillconsumption": "lastbillconsumption",
+	"lastbillamount":      "lastbillamount",
+	"currentbalance":      "currentbalance",
+	"lastpaymentdate":     "lastpaymentdate",
+	"fullname":            "fullname",
+}
+
+func detailOrderExpr(sortBy, sortDir string) string {
+	col, ok := detailSortCols[strings.ToLower(strings.TrimSpace(sortBy))]
+	if !ok {
+		col = "lastbillconsumption"
+	}
+	dir := "DESC"
+	if strings.EqualFold(strings.TrimSpace(sortDir), "asc") {
+		dir = "ASC"
+	}
+	// Tie-breakers keep pages stable when values collide.
+	return col + " " + dir + " NULLS LAST, accountnumber ASC, servicepointnumber ASC"
+}
+
 // Detail returns a page of matching rows. The select and its count run
 // concurrently inside dbx.Paginate.
-func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Pagination) (*dbx.Page[Sale], error) {
+func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Pagination, sortBy, sortDir string) (*dbx.Page[Sale], error) {
 	q := s.base(p).
 		ColumnExpr("*").
 		ColumnExpr("'Zeus' AS data_src").
-		OrderExpr("regionname, districtname, fullname, accountnumber") // stable sort
+		OrderExpr(detailOrderExpr(sortBy, sortDir))
 	return dbx.Paginate[Sale](ctx, q, pg)
 }
 

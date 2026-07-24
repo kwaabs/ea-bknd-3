@@ -80,9 +80,12 @@ func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "invalid date: use YYYY-MM-DD")
 		return
 	}
+	// Per-request page size is capped; navigate ?page= to walk the full result set.
 	pg := httpx.ParsePagination(q, 50, 500)
+	sortBy := q.Get("sortBy")
+	sortDir := q.Get("sortDir")
 
-	result, err := h.svc.Detail(r.Context(), params, pg)
+	result, err := h.svc.Detail(r.Context(), params, pg, sortBy, sortDir)
 	if err != nil {
 		h.log.Error("zeus sales detail failed", zap.Error(err))
 		httpx.Error(w, http.StatusInternalServerError, "internal error")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"bknd-3/internal/dbx"
 	"bknd-3/internal/httpx"
@@ -18,6 +19,34 @@ type Service struct {
 }
 
 func NewService(db *bun.DB) *Service { return &Service{db: db} }
+
+// billMonthsInRange returns lowercased "January 2006" labels for every
+// calendar month that overlaps [from, to]. Used so the UI date range filters
+// on billmonth (billing period), not lastbilldate (posting date).
+func billMonthsInRange(from, to time.Time) []string {
+	if from.IsZero() && to.IsZero() {
+		return nil
+	}
+	start := from
+	if start.IsZero() {
+		start = to
+	}
+	end := to
+	if end.IsZero() {
+		end = from
+	}
+	if end.Before(start) {
+		start, end = end, start
+	}
+	start = time.Date(start.Year(), start.Month(), 1, 0, 0, 0, 0, time.UTC)
+	end = time.Date(end.Year(), end.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+	var months []string
+	for d := start; !d.After(end); d = d.AddDate(0, 1, 0) {
+		months = append(months, strings.ToLower(d.Format("January 2006")))
+	}
+	return months
+}
 
 // base returns a select on the sales table with all filters applied.
 // Both Detail and Aggregate use this — there is no pre-aggregated summary
@@ -34,9 +63,10 @@ func (s *Service) base(p FilterParams) *bun.SelectQuery {
 	q = dbx.InLower(q, "accounttype", p.AccountType)
 	q = dbx.InLower(q, "contractstatus", p.ContractStatus)
 	q = dbx.InLower(q, "billmonth", p.BillMonth)
+	// UI date range (lastBillDateFrom/To) selects billing period via billmonth.
+	q = dbx.InLower(q, "billmonth", billMonthsInRange(p.LastBillDateFrom, p.LastBillDateTo))
 	q = dbx.In(q, "accountnumber", p.AccountNumber)
 	q = dbx.In(q, "servicepointnumber", p.ServicePointNumber)
-	q = dbx.DateRange(q, "lastbilldate", p.LastBillDateFrom, p.LastBillDateTo)
 	q = dbx.DateRange(q, "lastreadingdate", p.LastReadingDateFrom, p.LastReadingDateTo)
 
 	if p.IsAMR != "" {

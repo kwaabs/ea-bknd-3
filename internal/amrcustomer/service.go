@@ -17,6 +17,20 @@ func NewService(db *bun.DB) *Service {
 	return &Service{db: db}
 }
 
+// Deduped meter rows must expose every column used by buildAmrFilters
+// (region, district, community, tariff, customer/account/service type, slt_type,
+// account_no_, spn) or status/health queries fail when those filters are set.
+const amrMeterDedupSQL = `
+			SELECT DISTINCT ON (meter_number)
+				id, meter_number, region, district, community,
+				customer_name, account_no_, spn,
+				tariffclassname, customertype, accounttype,
+				contractstatus, servicetype, slt_type
+			FROM app.amr_customer_records
+			WHERE meter_number IS NOT NULL
+			ORDER BY meter_number, id
+`
+
 // ===================================================
 // QUERY PARAMS PARSER
 // ===================================================
@@ -468,15 +482,7 @@ func (s *Service) GetMeterStatus(
 	filters := buildAmrFilters(params)
 
 	q := s.db.NewSelect().
-		TableExpr(`(
-			SELECT DISTINCT ON (meter_number)
-				id, meter_number, region, district, community,
-				customer_name, account_no_, tariffclassname,
-				contractstatus, servicetype
-			FROM app.amr_customer_records
-			WHERE meter_number IS NOT NULL
-			ORDER BY meter_number, id
-		) AS acr`).
+		TableExpr("("+amrMeterDedupSQL+") AS acr").
 		Join(`LEFT JOIN app.amr_meter_consumption_daily AS mcd
 			ON acr.meter_number = mcd.meter_number
 			AND mcd.consumption_date BETWEEN ? AND ?`,
@@ -536,15 +542,7 @@ func (s *Service) GetMeterStatusSummary(
 	filters := buildAmrFilters(params)
 
 	q := s.db.NewSelect().
-		TableExpr(`(
-			SELECT DISTINCT ON (meter_number)
-				id, meter_number, region, district, community,
-				tariffclassname, customertype, accounttype,
-				contractstatus, servicetype
-			FROM app.amr_customer_records
-			WHERE meter_number IS NOT NULL
-			ORDER BY meter_number, id
-		) AS acr`).
+		TableExpr("("+amrMeterDedupSQL+") AS acr").
 		Join(`LEFT JOIN (
 			SELECT
 				meter_number,
@@ -633,14 +631,7 @@ func (s *Service) GetMeterStatusTimeline(
 
 	// Build filtered meter subquery
 	meterSubQ := s.db.NewSelect().
-		TableExpr(`(
-			SELECT DISTINCT ON (meter_number)
-				meter_number, region, district, community,
-				tariffclassname, customertype, contractstatus, servicetype
-			FROM app.amr_customer_records
-			WHERE meter_number IS NOT NULL
-			ORDER BY meter_number, id
-		) AS acr`).
+		TableExpr("("+amrMeterDedupSQL+") AS acr").
 		ColumnExpr("acr.meter_number")
 
 	for _, f := range filters {
@@ -708,15 +699,7 @@ func (s *Service) GetMeterStatusDetails(
 
 	// Fast count
 	countQ := s.db.NewSelect().
-		TableExpr(`(
-			SELECT DISTINCT ON (meter_number)
-				id, meter_number, region, district, community,
-				tariffclassname, customertype, accounttype,
-				contractstatus, servicetype
-			FROM app.amr_customer_records
-			WHERE meter_number IS NOT NULL
-			ORDER BY meter_number, id
-		) AS acr`)
+		TableExpr("("+amrMeterDedupSQL+") AS acr")
 
 	for _, f := range filters {
 		if strings.Contains(strings.ToLower(f.Query), "consumption_date") {
@@ -738,15 +721,7 @@ func (s *Service) GetMeterStatusDetails(
 
 	// Main query
 	q := s.db.NewSelect().
-		TableExpr(`(
-			SELECT DISTINCT ON (meter_number)
-				id, meter_number, region, district, community,
-				customer_name, account_no_, tariffclassname,
-				contractstatus, servicetype
-			FROM app.amr_customer_records
-			WHERE meter_number IS NOT NULL
-			ORDER BY meter_number, id
-		) AS acr`).
+		TableExpr("("+amrMeterDedupSQL+") AS acr").
 		Join(`LEFT JOIN app.amr_meter_consumption_daily AS mcd
 			ON acr.meter_number = mcd.meter_number
 			AND mcd.consumption_date BETWEEN ? AND ?`,
@@ -880,14 +855,7 @@ func (s *Service) GetMeterHealthSummary(
 	filters := buildAmrFilters(params)
 
 	q := s.db.NewSelect().
-		TableExpr(`(
-			SELECT DISTINCT ON (meter_number)
-				id, meter_number, region, district, community,
-				tariffclassname, customertype, contractstatus, servicetype
-			FROM app.amr_customer_records
-			WHERE meter_number IS NOT NULL
-			ORDER BY meter_number, id
-		) AS acr`).
+		TableExpr("("+amrMeterDedupSQL+") AS acr").
 		Join(`LEFT JOIN (
 			SELECT
 				meter_number,
@@ -937,14 +905,7 @@ func (s *Service) GetMeterHealthSummary(
 	var byTariff []AmrHealthByTariffClass
 
 	qTariff := s.db.NewSelect().
-		TableExpr(`(
-			SELECT DISTINCT ON (meter_number)
-				id, meter_number, region, district, community,
-				tariffclassname, customertype, contractstatus, servicetype
-			FROM app.amr_customer_records
-			WHERE meter_number IS NOT NULL
-			ORDER BY meter_number, id
-		) AS acr`).
+		TableExpr("("+amrMeterDedupSQL+") AS acr").
 		Join(`LEFT JOIN (
 			SELECT
 				meter_number,
@@ -980,14 +941,7 @@ func (s *Service) GetMeterHealthSummary(
 	var byRegion []AmrHealthByRegion
 
 	qRegion := s.db.NewSelect().
-		TableExpr(`(
-			SELECT DISTINCT ON (meter_number)
-				id, meter_number, region, district, community,
-				tariffclassname, customertype, contractstatus, servicetype
-			FROM app.amr_customer_records
-			WHERE meter_number IS NOT NULL
-			ORDER BY meter_number, id
-		) AS acr`).
+		TableExpr("("+amrMeterDedupSQL+") AS acr").
 		Join(`LEFT JOIN (
 			SELECT
 				meter_number,
@@ -1058,15 +1012,7 @@ func (s *Service) GetMeterHealthDetails(
 
 	// Base CTE
 	baseCTE := s.db.NewSelect().
-		TableExpr(`(
-			SELECT DISTINCT ON (meter_number)
-				id, meter_number, region, district, community,
-				customer_name, account_no_, tariffclassname,
-				contractstatus, servicetype
-			FROM app.amr_customer_records
-			WHERE meter_number IS NOT NULL
-			ORDER BY meter_number, id
-		) AS acr`).
+		TableExpr("("+amrMeterDedupSQL+") AS acr").
 		Join(`LEFT JOIN (
 			SELECT
 				meter_number,

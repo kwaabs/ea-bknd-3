@@ -163,16 +163,16 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 }
 
 // distinctCustomerCounts computes customer_count per group via a two-level
-// GROUP BY (account, service point has one row per billing month, so the
-// same customer must be collapsed before counting). This is a separate query
-// rather than COUNT(DISTINCT (accountnumber, servicepointnumber)) inline in
-// Aggregate: on customer_sales_zeus (15M+ rows) COUNT(DISTINCT ...) forces a
-// full sort of the matching rows and measured at 30-40s for a region +
-// multi-month range. Pushing the dedup into an inner GROUP BY lets Postgres
-// use a hash aggregate instead, landing at ~13s — close to the cost of the
-// base scan itself, and run concurrently with it by the caller.
+// GROUP BY. One account can have many service points and many bill months, so
+// we collapse to distinct (accountnumber, servicepointnumber) before counting.
+// A separate query (vs inline COUNT DISTINCT) lets Postgres hash-aggregate
+// and runs concurrently with the sums scan.
 func (s *Service) distinctCustomerCounts(ctx context.Context, p FilterParams, groups []string) ([]AggregateRow, error) {
-	inner := s.base(p).ColumnExpr("accountnumber").GroupExpr("accountnumber")
+	inner := s.base(p).
+		ColumnExpr("accountnumber").
+		ColumnExpr("servicepointnumber").
+		GroupExpr("accountnumber").
+		GroupExpr("servicepointnumber")
 	for _, g := range groups {
 		inner = inner.ColumnExpr(g).GroupExpr(g)
 	}

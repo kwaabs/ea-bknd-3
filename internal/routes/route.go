@@ -203,7 +203,8 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 		r.Mount("/announcements", announcements.Routes(db, cfg, logr.Logger))
 		r.Mount("/admin/login-stats", loginstats.Routes(db, logr.Logger))
 		r.Mount("/service-areas", serviceareas.Routes(db, logr.Logger))
-		r.Mount("/amr", amrcustomer.Routes(db, logr.Logger))
+		// Same Redis response cache as Zeus/MMS consumption aggregates.
+		r.Mount("/amr", amrcustomer.Routes(db, logr.Logger, cacheMW))
 
 	})
 

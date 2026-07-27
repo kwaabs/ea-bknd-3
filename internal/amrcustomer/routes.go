@@ -9,10 +9,11 @@ import (
 )
 
 // Routes wires the whole domain and returns a router ready to Mount.
+// Optional middleware (e.g. the response cache) is applied to all routes.
 //
 // In the app router:
 //
-//	r.Mount("/amr", amrcustomer.Routes(db, logr.Logger))
+//	r.Mount("/amr", amrcustomer.Routes(db, logr.Logger, cacheMW))
 func Routes(db *bun.DB, log *zap.Logger, mw ...func(http.Handler) http.Handler) chi.Router {
 	h := NewHandler(NewService(db), log)
 

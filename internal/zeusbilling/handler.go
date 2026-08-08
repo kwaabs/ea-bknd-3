@@ -74,6 +74,7 @@ func parseFilters(q url.Values) (FilterParams, error) {
 		BillStatus:          httpx.CSV(q, "billStatus"),
 		BillConsumptionType: httpx.CSV(q, "billConsumptionType"),
 		MeterModelType:      httpx.CSV(q, "meterModelType"),
+		ServicePointStatus:  httpx.CSV(q, "servicePointStatus"),
 		BillingYear:         intCSV(q, "billingYear"),
 		BillingMonth:        intCSV(q, "billingMonth"),
 		IsSensitive:         q.Get("isSensitive"),

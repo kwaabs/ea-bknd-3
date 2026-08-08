@@ -135,11 +135,6 @@ func (h *Handler) Aggregate(w http.ResponseWriter, r *http.Request) {
 		groupBy = []string{"regionname"}
 	}
 
-	groupBy := httpx.CSV(q, "groupBy")
-	if len(groupBy) == 0 {
-		groupBy = []string{"regionname"}
-	}
-
 	result, err := h.svc.Aggregate(r.Context(), params, groupBy)
 	if err != nil {
 		h.log.Error("zeus billing aggregate failed", zap.Error(err))

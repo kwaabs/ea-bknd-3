@@ -16,6 +16,7 @@ import (
 	"bknd-3/internal/mmssales"
 	"bknd-3/internal/serviceareas"
 	"bknd-3/internal/services"
+	"bknd-3/internal/zeusbilling"
 	"bknd-3/internal/zeussales"
 
 	"net/http"
@@ -174,6 +175,9 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 
 				r.Mount("/customer-sales-zeus", zeussales.Routes(db, logr.Logger))
 				r.Mount("/mms-customer-sales", mmssales.Routes(db, logr.Logger))
+				// New, improved Zeus source data (app.zeus_sales) — additive,
+				// does not read from or replace customer-sales-zeus above.
+				r.Mount("/zeus-billing", zeusbilling.Routes(db, logr.Logger))
 			})
 
 			// ✅ NEW: Spatial service area routes

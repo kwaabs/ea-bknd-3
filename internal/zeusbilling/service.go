@@ -104,6 +104,7 @@ var validGroupBy = map[string]bool{
 	"serviceclass":    true,
 	"accounttype":     true,
 	"billstatus":      true,
+	"metermodeltype":  true,
 	"billingyear":     true,
 	"billingmonth":    true,
 }
@@ -219,6 +220,8 @@ func aggregateGroupKey(r AggregateRow, groups []string) string {
 			vals[i] = r.AccountType
 		case "billstatus":
 			vals[i] = r.BillStatus
+		case "metermodeltype":
+			vals[i] = r.MeterModelType
 		case "billingyear":
 			vals[i] = strconv.Itoa(r.BillingYear)
 		case "billingmonth":

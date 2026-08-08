@@ -128,6 +128,7 @@ type AggregateRow struct {
 	ServiceClass            string  `bun:"serviceclass" json:"serviceclass,omitempty"`
 	AccountType             string  `bun:"accounttype" json:"accounttype,omitempty"`
 	BillStatus              string  `bun:"billstatus" json:"billstatus,omitempty"`
+	MeterModelType          string  `bun:"metermodeltype" json:"metermodeltype,omitempty"`
 	BillingYear             int     `bun:"billingyear" json:"billingyear,omitempty"`
 	BillingMonth            int     `bun:"billingmonth" json:"billingmonth,omitempty"`
 	CustomerCount           int64   `bun:"customer_count" json:"customer_count"`

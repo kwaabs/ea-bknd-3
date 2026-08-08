@@ -105,6 +105,7 @@ type FilterParams struct {
 	BillStatus          []string
 	BillConsumptionType []string
 	MeterModelType      []string
+	ServicePointStatus  []string
 	BillingYear         []int
 	BillingMonth        []int
 	IsSensitive         string

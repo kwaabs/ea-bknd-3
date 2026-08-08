@@ -35,6 +35,7 @@ func (s *Service) base(p FilterParams) *bun.SelectQuery {
 	q = dbx.InLower(q, "billstatus", p.BillStatus)
 	q = dbx.InLower(q, "billconsumptiontype", p.BillConsumptionType)
 	q = dbx.InLower(q, "metermodeltype", p.MeterModelType)
+	q = dbx.InLower(q, "servicepointstatus", p.ServicePointStatus)
 	q = dbx.In(q, "accountcode", p.AccountCode)
 	q = dbx.In(q, "servicepointcode", p.ServicePointCode)
 	q = dbx.In(q, "metercode", p.MeterCode)

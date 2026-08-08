@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"bknd-3/internal/dbx"
 	"bknd-3/internal/httpx"
@@ -19,6 +20,39 @@ type Service struct {
 }
 
 func NewService(db *bun.DB) *Service { return &Service{db: db} }
+
+// billingPeriodCodesInRange returns YYYYMM ints (e.g. 202512) for every
+// calendar month that overlaps [from, to]. Mirrors internal/zeussales'
+// billMonthsInRange, but zeus_sales stores billing period as two separate
+// int columns rather than one formatted string — a plain
+// "billingyear IN (...) AND billingmonth IN (...)" filter would wrongly
+// match e.g. January of every selected year for a range like
+// Dec 2025-Jan 2026, so ranges are expressed as combined period codes
+// instead and matched via (billingyear*100 + billingmonth) IN (...).
+func billingPeriodCodesInRange(from, to time.Time) []int {
+	if from.IsZero() && to.IsZero() {
+		return nil
+	}
+	start := from
+	if start.IsZero() {
+		start = to
+	}
+	end := to
+	if end.IsZero() {
+		end = from
+	}
+	if end.Before(start) {
+		start, end = end, start
+	}
+	start = time.Date(start.Year(), start.Month(), 1, 0, 0, 0, 0, time.UTC)
+	end = time.Date(end.Year(), end.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+	var codes []int
+	for d := start; !d.After(end); d = d.AddDate(0, 1, 0) {
+		codes = append(codes, d.Year()*100+int(d.Month()))
+	}
+	return codes
+}
 
 // base returns a select on the zeus_sales table with all filters applied.
 // Aggregate always scans this directly (grouped) — no pre-aggregated
@@ -49,6 +83,9 @@ func (s *Service) base(p FilterParams) *bun.SelectQuery {
 	}
 	if len(p.BillingMonth) > 0 {
 		q = q.Where("billingmonth IN (?)", bun.In(p.BillingMonth))
+	}
+	if codes := billingPeriodCodesInRange(p.BillDateFrom, p.BillDateTo); len(codes) > 0 {
+		q = q.Where("(billingyear * 100 + billingmonth) IN (?)", bun.In(codes))
 	}
 
 	if p.IsSensitive != "" {

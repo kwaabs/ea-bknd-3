@@ -135,15 +135,17 @@ func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Paginatio
 
 // validGroupBy whitelists groupable columns.
 var validGroupBy = map[string]bool{
-	"regionname":      true,
-	"districtname":    true,
-	"tariffclasscode": true,
-	"serviceclass":    true,
-	"accounttype":     true,
-	"billstatus":      true,
-	"metermodeltype":  true,
-	"billingyear":     true,
-	"billingmonth":    true,
+	"regionname":         true,
+	"districtname":       true,
+	"tariffclasscode":    true,
+	"tariffclassname":    true,
+	"serviceclass":       true,
+	"accounttype":        true,
+	"billstatus":         true,
+	"metermodeltype":     true,
+	"servicepointstatus": true,
+	"billingyear":        true,
+	"billingmonth":       true,
 }
 
 // Aggregate returns grouped sums/counts over the raw table.
@@ -251,6 +253,8 @@ func aggregateGroupKey(r AggregateRow, groups []string) string {
 			vals[i] = r.DistrictName
 		case "tariffclasscode":
 			vals[i] = r.TariffClassCode
+		case "tariffclassname":
+			vals[i] = r.TariffClassName
 		case "serviceclass":
 			vals[i] = r.ServiceClass
 		case "accounttype":
@@ -259,6 +263,8 @@ func aggregateGroupKey(r AggregateRow, groups []string) string {
 			vals[i] = r.BillStatus
 		case "metermodeltype":
 			vals[i] = r.MeterModelType
+		case "servicepointstatus":
+			vals[i] = r.ServicePointStatus
 		case "billingyear":
 			vals[i] = strconv.Itoa(r.BillingYear)
 		case "billingmonth":

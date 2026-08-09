@@ -132,10 +132,12 @@ type AggregateRow struct {
 	RegionName              string  `bun:"regionname" json:"regionname,omitempty"`
 	DistrictName            string  `bun:"districtname" json:"districtname,omitempty"`
 	TariffClassCode         string  `bun:"tariffclasscode" json:"tariffclasscode,omitempty"`
+	TariffClassName         string  `bun:"tariffclassname" json:"tariffclassname,omitempty"`
 	ServiceClass            string  `bun:"serviceclass" json:"serviceclass,omitempty"`
 	AccountType             string  `bun:"accounttype" json:"accounttype,omitempty"`
 	BillStatus              string  `bun:"billstatus" json:"billstatus,omitempty"`
 	MeterModelType          string  `bun:"metermodeltype" json:"metermodeltype,omitempty"`
+	ServicePointStatus      string  `bun:"servicepointstatus" json:"servicepointstatus,omitempty"`
 	BillingYear             int     `bun:"billingyear" json:"billingyear,omitempty"`
 	BillingMonth            int     `bun:"billingmonth" json:"billingmonth,omitempty"`
 	CustomerCount           int64   `bun:"customer_count" json:"customer_count"`

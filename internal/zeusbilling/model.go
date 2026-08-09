@@ -117,6 +117,13 @@ type FilterParams struct {
 	LastPaymentDateTo   time.Time
 	CreatedAtFrom       time.Time
 	CreatedAtTo         time.Time
+	// BillDateFrom/To select the billing period (billingyear+billingmonth)
+	// covering this range — there is no day-precision bill-date column in
+	// zeus_sales, so a UI date-range picker maps onto whole months here.
+	// Distinct from BillingYear/BillingMonth above, which are independent
+	// exact-match filters; these two express a single contiguous range.
+	BillDateFrom time.Time
+	BillDateTo   time.Time
 }
 
 // AggregateRow is a single grouped aggregate row.
@@ -128,6 +135,7 @@ type AggregateRow struct {
 	ServiceClass            string  `bun:"serviceclass" json:"serviceclass,omitempty"`
 	AccountType             string  `bun:"accounttype" json:"accounttype,omitempty"`
 	BillStatus              string  `bun:"billstatus" json:"billstatus,omitempty"`
+	MeterModelType          string  `bun:"metermodeltype" json:"metermodeltype,omitempty"`
 	BillingYear             int     `bun:"billingyear" json:"billingyear,omitempty"`
 	BillingMonth            int     `bun:"billingmonth" json:"billingmonth,omitempty"`
 	CustomerCount           int64   `bun:"customer_count" json:"customer_count"`

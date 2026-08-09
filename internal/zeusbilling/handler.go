@@ -57,6 +57,14 @@ func parseFilters(q url.Values) (FilterParams, error) {
 	if err != nil {
 		return FilterParams{}, err
 	}
+	billDateFrom, err := httpx.Date(q, "billDateFrom")
+	if err != nil {
+		return FilterParams{}, err
+	}
+	billDateTo, err := httpx.Date(q, "billDateTo")
+	if err != nil {
+		return FilterParams{}, err
+	}
 	// Make the "To" dates inclusive of the whole end day.
 	if !lastPaymentTo.IsZero() {
 		lastPaymentTo = lastPaymentTo.AddDate(0, 0, 1).Add(-time.Microsecond)
@@ -86,6 +94,8 @@ func parseFilters(q url.Values) (FilterParams, error) {
 		LastPaymentDateTo:   lastPaymentTo,
 		CreatedAtFrom:       createdFrom,
 		CreatedAtTo:         createdTo,
+		BillDateFrom:        billDateFrom,
+		BillDateTo:          billDateTo,
 	}, nil
 }
 

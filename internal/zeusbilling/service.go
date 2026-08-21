@@ -2,9 +2,7 @@ package zeusbilling
 
 import (
 	"context"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"bknd-3/internal/dbx"
@@ -140,7 +138,14 @@ var validGroupBy = map[string]bool{
 	"billingmonth":       true,
 }
 
-// Aggregate returns grouped sums/counts over the raw table.
+// Aggregate returns grouped sums/counts over the raw table in a single pass.
+// customer_count is COUNT(DISTINCT (accountcode, servicepointcode)) computed
+// inline — one account can have many service points and many bills across
+// billing periods, so a plain COUNT(*) would overcount. This used to run as
+// a second query (sums here, counts via a nested GROUP BY subquery there)
+// executed concurrently; folding it into one query halves the DB round
+// trips this endpoint makes, which matters since callers commonly fire
+// several Aggregate() calls (one per breakdown dimension) on page load.
 func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []string) (*AggregateResult, error) {
 	var groups []string
 	for _, g := range groupBy {
@@ -152,6 +157,7 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 
 	q := s.base(p).
 		ColumnExpr("'ZeusBilling' AS data_src").
+		ColumnExpr("COUNT(DISTINCT (accountcode, servicepointcode)) AS customer_count").
 		ColumnExpr("COALESCE(ROUND(SUM(billamount)::numeric, 2), 0) AS sum_billamount").
 		ColumnExpr("COALESCE(ROUND(SUM(amountdue)::numeric, 2), 0) AS sum_amountdue").
 		ColumnExpr("COALESCE(ROUND(SUM(debtamount)::numeric, 2), 0) AS sum_debtamount").
@@ -165,103 +171,13 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 		q = q.OrderExpr(strings.Join(groups, ", "))
 	}
 
-	// Sums and the distinct-bill-count run concurrently on the pool rather
-	// than back to back — same reasoning as internal/zeussales.
 	var data []AggregateRow
-	var counts []AggregateRow
-	var scanErr, countErr error
-	var wg sync.WaitGroup
-
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		scanErr = q.Scan(ctx, &data)
-	}()
-	go func() {
-		defer wg.Done()
-		counts, countErr = s.distinctCustomerCounts(ctx, p, groups)
-	}()
-	wg.Wait()
-
-	if scanErr != nil {
-		return nil, scanErr
-	}
-	if countErr != nil {
-		return nil, countErr
+	if err := q.Scan(ctx, &data); err != nil {
+		return nil, err
 	}
 	if data == nil {
 		data = []AggregateRow{}
 	}
 
-	byKey := make(map[string]int64, len(counts))
-	for _, r := range counts {
-		byKey[aggregateGroupKey(r, groups)] = r.CustomerCount
-	}
-	for i := range data {
-		data[i].CustomerCount = byKey[aggregateGroupKey(data[i], groups)]
-	}
-
 	return &AggregateResult{Data: data, Total: len(data)}, nil
-}
-
-// distinctCustomerCounts computes customer_count per group via a two-level
-// GROUP BY. One account can have many service points and many bills across
-// billing periods, so we collapse to distinct (accountcode, servicepointcode)
-// before counting — same reasoning as internal/zeussales.
-func (s *Service) distinctCustomerCounts(ctx context.Context, p FilterParams, groups []string) ([]AggregateRow, error) {
-	inner := s.base(p).
-		ColumnExpr("accountcode").
-		ColumnExpr("servicepointcode").
-		GroupExpr("accountcode").
-		GroupExpr("servicepointcode")
-	for _, g := range groups {
-		inner = inner.ColumnExpr(g).GroupExpr(g)
-	}
-
-	q := s.db.NewSelect().
-		TableExpr("(?) AS distinct_customers", inner).
-		ColumnExpr("COUNT(*) AS customer_count")
-	for _, g := range groups {
-		q = q.ColumnExpr(g).GroupExpr(g)
-	}
-
-	var counts []AggregateRow
-	if err := q.Scan(ctx, &counts); err != nil {
-		return nil, err
-	}
-	return counts, nil
-}
-
-// aggregateGroupKey builds a composite key from whichever dimensions were
-// actually grouped, so results from the two separately-executed queries
-// with the same GROUP BY can be matched back up row-for-row.
-func aggregateGroupKey(r AggregateRow, groups []string) string {
-	vals := make([]string, len(groups))
-	for i, g := range groups {
-		switch g {
-		case "regionname":
-			vals[i] = r.RegionName
-		case "districtname":
-			vals[i] = r.DistrictName
-		case "tariffclasscode":
-			vals[i] = r.TariffClassCode
-		case "tariffclassname":
-			vals[i] = r.TariffClassName
-		case "serviceclass":
-			vals[i] = r.ServiceClass
-		case "accounttype":
-			vals[i] = r.AccountType
-		case "billstatus":
-			vals[i] = r.BillStatus
-		case "metermodeltype":
-			vals[i] = r.MeterModelType
-		case "servicepointstatus":
-			vals[i] = r.ServicePointStatus
-		case "billingyear":
-			vals[i] = strconv.Itoa(r.BillingYear)
-		case "billingmonth":
-			vals[i] = strconv.Itoa(r.BillingMonth)
-		}
-	}
-	return strings.Join(vals, "\x00")
 }

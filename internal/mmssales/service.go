@@ -3,6 +3,7 @@ package mmssales
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"bknd-3/internal/dbx"
 	"bknd-3/internal/httpx"
@@ -102,39 +103,54 @@ var validGroupBy = map[string]bool{
 func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []string) (*AggregateResult, error) {
 	rowLevel := p.hasRowLevelFilters()
 
-	var q *bun.SelectQuery
+	var groups []string
+	for _, g := range groupBy {
+		g = strings.ToLower(strings.TrimSpace(g))
+		if validGroupBy[g] {
+			groups = append(groups, g)
+		}
+	}
+
 	if rowLevel {
-		// Raw-table fallback: aggregate raw rows directly. Distinct on
-		// (account, meter) — the same customer can have a row per day in
-		// range, so COUNT(*) would count them once per day.
-		q = s.base(p).
+		// Raw-table fallback: aggregate raw rows directly, everything in one
+		// query. Distinct on (account, meter) — the same customer can have a
+		// row per day in range, so COUNT(*) would count them once per day.
+		q := s.base(p).
 			ColumnExpr("'MMS Sales' AS data_src").
 			ColumnExpr("COUNT(DISTINCT (account_number, meter_number)) AS customer_count").
 			ColumnExpr("COALESCE(ROUND(SUM(sts_credit_balance_remaining)::numeric, 2), 0) AS sum_credit_balance_remaining").
 			ColumnExpr("COALESCE(ROUND(SUM(sts_last_month_credit_read)::numeric, 2), 0) AS sum_last_month_credit_read").
 			ColumnExpr("COALESCE(ROUND(SUM(sts_last_month_kwh_read)::numeric, 2), 0) AS sum_last_month_kwh_read")
-	} else {
-		// Fast path: re-aggregate the daily summary for the flow sums
-		// (correct and cheap — SUM over a few thousand summary rows). The
-		// summary's customer_count is per calendar day though, so SUM-ing it
-		// across a multi-day range would count the same customer once per
-		// day they appear. Left as a placeholder here and backfilled from a
-		// raw-table distinct count below.
-		q = s.summaryBase(p).
-			ColumnExpr("'MMS Sales' AS data_src").
-			ColumnExpr("0 AS customer_count").
-			ColumnExpr("COALESCE(ROUND(SUM(sum_credit_balance_remaining)::numeric, 2), 0) AS sum_credit_balance_remaining").
-			ColumnExpr("COALESCE(ROUND(SUM(sum_last_month_credit_read)::numeric, 2), 0) AS sum_last_month_credit_read").
-			ColumnExpr("COALESCE(ROUND(SUM(sum_last_month_kwh_read)::numeric, 2), 0) AS sum_last_month_kwh_read")
+		for _, g := range groups {
+			q = q.ColumnExpr(g).GroupExpr(g)
+		}
+		if len(groups) > 0 {
+			q = q.OrderExpr(strings.Join(groups, ", "))
+		}
+
+		var data []AggregateRow
+		if err := q.Scan(ctx, &data); err != nil {
+			return nil, err
+		}
+		if data == nil {
+			data = []AggregateRow{}
+		}
+		return &AggregateResult{Data: data, Total: len(data)}, nil
 	}
 
-	var groups []string
-	for _, g := range groupBy {
-		g = strings.ToLower(strings.TrimSpace(g))
-		if !validGroupBy[g] {
-			continue
-		}
-		groups = append(groups, g)
+	// Fast path: re-aggregate the daily summary for the flow sums (correct
+	// and cheap — SUM over a few thousand summary rows). The summary's
+	// customer_count is per calendar day though, so SUM-ing it across a
+	// multi-day range would count the same customer once per day they
+	// appear — a true distinct count needs the raw table instead. That
+	// query and the summary query run concurrently rather than back to
+	// back, then get merged by group key below.
+	q := s.summaryBase(p).
+		ColumnExpr("'MMS Sales' AS data_src").
+		ColumnExpr("COALESCE(ROUND(SUM(sum_credit_balance_remaining)::numeric, 2), 0) AS sum_credit_balance_remaining").
+		ColumnExpr("COALESCE(ROUND(SUM(sum_last_month_credit_read)::numeric, 2), 0) AS sum_last_month_credit_read").
+		ColumnExpr("COALESCE(ROUND(SUM(sum_last_month_kwh_read)::numeric, 2), 0) AS sum_last_month_kwh_read")
+	for _, g := range groups {
 		q = q.ColumnExpr(g).GroupExpr(g)
 	}
 	if len(groups) > 0 {
@@ -142,36 +158,29 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 	}
 
 	var data []AggregateRow
-	if err := q.Scan(ctx, &data); err != nil {
-		return nil, err
+	var counts []AggregateRow
+	var scanErr, countErr error
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		scanErr = q.Scan(ctx, &data)
+	}()
+	go func() {
+		defer wg.Done()
+		counts, countErr = s.distinctCustomerCounts(ctx, p, groups)
+	}()
+	wg.Wait()
+
+	if scanErr != nil {
+		return nil, scanErr
+	}
+	if countErr != nil {
+		return nil, countErr
 	}
 	if data == nil {
 		data = []AggregateRow{}
-	}
-
-	if !rowLevel && len(data) > 0 {
-		if err := s.backfillDistinctCustomerCounts(ctx, p, groups, data); err != nil {
-			return nil, err
-		}
-	}
-
-	return &AggregateResult{Data: data, Total: len(data)}, nil
-}
-
-// backfillDistinctCustomerCounts replaces the placeholder customer_count on
-// each row with a true COUNT(DISTINCT account_number, meter_number) from the
-// raw table, grouped the same way as the summary query. Only needed on the
-// summary fast-path — the pre-aggregated table can't answer this correctly
-// once the date range spans more than one day.
-func (s *Service) backfillDistinctCustomerCounts(ctx context.Context, p FilterParams, groups []string, data []AggregateRow) error {
-	q := s.base(p).ColumnExpr("COUNT(DISTINCT (account_number, meter_number)) AS customer_count")
-	for _, g := range groups {
-		q = q.ColumnExpr(g).GroupExpr(g)
-	}
-
-	var counts []AggregateRow
-	if err := q.Scan(ctx, &counts); err != nil {
-		return err
 	}
 
 	byKey := make(map[string]int64, len(counts))
@@ -181,7 +190,25 @@ func (s *Service) backfillDistinctCustomerCounts(ctx context.Context, p FilterPa
 	for i := range data {
 		data[i].CustomerCount = byKey[aggregateGroupKey(data[i], groups)]
 	}
-	return nil
+
+	return &AggregateResult{Data: data, Total: len(data)}, nil
+}
+
+// distinctCustomerCounts computes a true COUNT(DISTINCT account_number,
+// meter_number) per group from the raw table. Used on the summary fast-path
+// — the pre-aggregated table can't answer this correctly once the date
+// range spans more than one day.
+func (s *Service) distinctCustomerCounts(ctx context.Context, p FilterParams, groups []string) ([]AggregateRow, error) {
+	q := s.base(p).ColumnExpr("COUNT(DISTINCT (account_number, meter_number)) AS customer_count")
+	for _, g := range groups {
+		q = q.ColumnExpr(g).GroupExpr(g)
+	}
+
+	var counts []AggregateRow
+	if err := q.Scan(ctx, &counts); err != nil {
+		return nil, err
+	}
+	return counts, nil
 }
 
 // aggregateGroupKey builds a composite key from whichever dimensions were

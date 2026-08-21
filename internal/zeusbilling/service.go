@@ -21,37 +21,29 @@ type Service struct {
 
 func NewService(db *bun.DB) *Service { return &Service{db: db} }
 
-// billingPeriodCodesInRange returns YYYYMM ints (e.g. 202512) for every
-// calendar month that overlaps [from, to]. Mirrors internal/zeussales'
-// billMonthsInRange, but zeus_sales stores billing period as two separate
-// int columns rather than one formatted string — a plain
-// "billingyear IN (...) AND billingmonth IN (...)" filter would wrongly
-// match e.g. January of every selected year for a range like
-// Dec 2025-Jan 2026, so ranges are expressed as combined period codes
-// instead and matched via (billingyear*100 + billingmonth) IN (...).
-func billingPeriodCodesInRange(from, to time.Time) []int {
+// billingPeriodDateBounds normalizes [from, to] into a half-open
+// [start, endExclusive) range over billingperiod_date — the first-of-month
+// date derived from billingyear/billingmonth and, critically, the column
+// zeus_sales is hypertable-partitioned on. Filtering on this column (rather
+// than an expression over billingyear/billingmonth) is what lets Postgres
+// exclude whole months' chunks instead of opening every chunk to check an
+// index. ok is false when both bounds are zero (no date filter requested).
+func billingPeriodDateBounds(from, to time.Time) (start, endExclusive time.Time, ok bool) {
 	if from.IsZero() && to.IsZero() {
-		return nil
+		return time.Time{}, time.Time{}, false
 	}
-	start := from
-	if start.IsZero() {
-		start = to
+	if from.IsZero() {
+		from = to
 	}
-	end := to
-	if end.IsZero() {
-		end = from
+	if to.IsZero() {
+		to = from
 	}
-	if end.Before(start) {
-		start, end = end, start
+	if to.Before(from) {
+		from, to = to, from
 	}
-	start = time.Date(start.Year(), start.Month(), 1, 0, 0, 0, 0, time.UTC)
-	end = time.Date(end.Year(), end.Month(), 1, 0, 0, 0, 0, time.UTC)
-
-	var codes []int
-	for d := start; !d.After(end); d = d.AddDate(0, 1, 0) {
-		codes = append(codes, d.Year()*100+int(d.Month()))
-	}
-	return codes
+	start = time.Date(from.Year(), from.Month(), 1, 0, 0, 0, 0, time.UTC)
+	endExclusive = time.Date(to.Year(), to.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 1, 0)
+	return start, endExclusive, true
 }
 
 // base returns a select on the zeus_sales table with all filters applied.
@@ -84,8 +76,8 @@ func (s *Service) base(p FilterParams) *bun.SelectQuery {
 	if len(p.BillingMonth) > 0 {
 		q = q.Where("billingmonth IN (?)", bun.In(p.BillingMonth))
 	}
-	if codes := billingPeriodCodesInRange(p.BillDateFrom, p.BillDateTo); len(codes) > 0 {
-		q = q.Where("(billingyear * 100 + billingmonth) IN (?)", bun.In(codes))
+	if start, endExclusive, ok := billingPeriodDateBounds(p.BillDateFrom, p.BillDateTo); ok {
+		q = q.Where("billingperiod_date >= ?", start).Where("billingperiod_date < ?", endExclusive)
 	}
 
 	if p.IsSensitive != "" {

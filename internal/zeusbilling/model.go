@@ -86,6 +86,14 @@ type Bill struct {
 	BillingYear  int    `bun:"billingyear" json:"billingYear"`
 	BillStatus   string `bun:"billstatus" json:"billStatus"`
 
+	// BillingPeriodDate is a first-of-month date derived from
+	// BillingYear/BillingMonth (kept in sync by a DB trigger). It exists so
+	// the table can be hypertable-partitioned on a real time column — see
+	// billingPeriodDateBounds in service.go. Not otherwise meaningful to API
+	// consumers, but Detail's `SELECT *` returns it, so it must be mapped
+	// here or bun's scan fails on this column.
+	BillingPeriodDate time.Time `bun:"billingperiod_date" json:"-"`
+
 	CreatedAt time.Time `bun:"createdat" json:"createdAt"`
 	UpdatedAt time.Time `bun:"updatedat" json:"updatedAt"`
 	V         int       `bun:"__v" json:"__v"`

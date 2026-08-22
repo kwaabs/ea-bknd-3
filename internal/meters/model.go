@@ -45,6 +45,81 @@ type Meter struct {
 	DeletedAt *time.Time `bun:",soft_delete,nullzero" json:"-"`
 }
 
+// ExpressFeeder pairs a sending meter with a receiving meter under one
+// feeder identity. Unlike other meter types, an express feeder isn't a
+// single row in app.meters — it's a relationship between two of them,
+// each referenced by FK (SendingMeterID/ReceivingMeterID), plus
+// denormalized station/type/code/region/district fields for each end
+// (kept in sync with the referenced meter but overridable, matching how
+// the existing read queries already fall back to the joined meter's
+// region/district when these are blank).
+type ExpressFeeder struct {
+	bun.BaseModel `bun:"table:app.express_feeders,alias:f"`
+
+	ID                     string     `bun:",pk,type:uuid,default:uuid_generate_v4()" json:"id"`
+	FeederName             string     `json:"feeder_name"`
+	SapVersion             *string    `json:"sap_version"`
+	Comments               *string    `json:"comments"`
+	SendingMeterID         string     `json:"sending_meter_id"`
+	SendingStation         *string    `json:"sending_station"`
+	SendingTypeOfStation   *string    `json:"sending_type_of_station"`
+	SendingCode            *string    `json:"sending_code"`
+	SendingRegion          *string    `json:"sending_region"`
+	SendingDistrict        *string    `json:"sending_district"`
+	ReceivingMeterID       string     `json:"receiving_meter_id"`
+	ReceivingStation       *string    `json:"receiving_station"`
+	ReceivingTypeOfStation *string    `json:"receiving_type_of_station"`
+	ReceivingCode          *string    `json:"receiving_code"`
+	ReceivingRegion        *string    `json:"receiving_region"`
+	ReceivingDistrict      *string    `json:"receiving_district"`
+	CreatedAt              *time.Time `json:"created_at"`
+	UpdatedAt              *time.Time `json:"updated_at"`
+
+	// DeletedAt — same bun soft-delete convention as Meter.DeletedAt.
+	// Retiring a pairing must not break historical Express Feeder
+	// dashboard queries that join against it by feeder_name/sap_version.
+	DeletedAt *time.Time `bun:",soft_delete,nullzero" json:"-"`
+}
+
+// ExpressFeederListItem is the read shape for the admin list — the pair
+// plus the sending/receiving meter numbers resolved via join, so the UI
+// can show something more useful than two bare meter ids. Flat (not
+// embedding ExpressFeeder) to match this file's existing convention for
+// joined query-result structs (e.g. ExpressFeederDailyResult).
+type ExpressFeederListItem struct {
+	ID                     string     `bun:"id" json:"id"`
+	FeederName             string     `bun:"feeder_name" json:"feeder_name"`
+	SapVersion             *string    `bun:"sap_version" json:"sap_version"`
+	Comments               *string    `bun:"comments" json:"comments"`
+	SendingMeterID         string     `bun:"sending_meter_id" json:"sending_meter_id"`
+	SendingMeterNumber     string     `bun:"sending_meter_number" json:"sending_meter_number"`
+	SendingStation         *string    `bun:"sending_station" json:"sending_station"`
+	SendingTypeOfStation   *string    `bun:"sending_type_of_station" json:"sending_type_of_station"`
+	SendingCode            *string    `bun:"sending_code" json:"sending_code"`
+	SendingRegion          *string    `bun:"sending_region" json:"sending_region"`
+	SendingDistrict        *string    `bun:"sending_district" json:"sending_district"`
+	ReceivingMeterID       string     `bun:"receiving_meter_id" json:"receiving_meter_id"`
+	ReceivingMeterNumber   string     `bun:"receiving_meter_number" json:"receiving_meter_number"`
+	ReceivingStation       *string    `bun:"receiving_station" json:"receiving_station"`
+	ReceivingTypeOfStation *string    `bun:"receiving_type_of_station" json:"receiving_type_of_station"`
+	ReceivingCode          *string    `bun:"receiving_code" json:"receiving_code"`
+	ReceivingRegion        *string    `bun:"receiving_region" json:"receiving_region"`
+	ReceivingDistrict      *string    `bun:"receiving_district" json:"receiving_district"`
+	CreatedAt              *time.Time `bun:"created_at" json:"created_at"`
+	UpdatedAt              *time.Time `bun:"updated_at" json:"updated_at"`
+}
+
+// ExpressFeederListResponse is the paginated admin-list response envelope.
+type ExpressFeederListResponse struct {
+	Data []ExpressFeederListItem `json:"data"`
+	Meta struct {
+		Page  int `json:"page"`
+		Limit int `json:"limit"`
+		Total int `json:"total"`
+		Pages int `json:"pages"`
+	} `json:"meta"`
+}
+
 type MeterReadingDaily struct {
 	bun.BaseModel `bun:"table:meter_readings_daily,alias:mrd"`
 

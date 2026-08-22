@@ -369,6 +369,197 @@ func (s *Service) SoftDeleteMeter(ctx context.Context, id string) error {
 	return nil
 }
 
+// ExpressFeederInput is the writable field set for creating or replacing
+// an express-feeder pairing via the admin UI — everything on
+// ExpressFeeder except ID/CreatedAt/UpdatedAt/DeletedAt.
+type ExpressFeederInput struct {
+	FeederName             string  `json:"feeder_name"`
+	SapVersion             *string `json:"sap_version"`
+	Comments               *string `json:"comments"`
+	SendingMeterID         string  `json:"sending_meter_id"`
+	SendingStation         *string `json:"sending_station"`
+	SendingTypeOfStation   *string `json:"sending_type_of_station"`
+	SendingCode            *string `json:"sending_code"`
+	SendingRegion          *string `json:"sending_region"`
+	SendingDistrict        *string `json:"sending_district"`
+	ReceivingMeterID       string  `json:"receiving_meter_id"`
+	ReceivingStation       *string `json:"receiving_station"`
+	ReceivingTypeOfStation *string `json:"receiving_type_of_station"`
+	ReceivingCode          *string `json:"receiving_code"`
+	ReceivingRegion        *string `json:"receiving_region"`
+	ReceivingDistrict      *string `json:"receiving_district"`
+}
+
+func (in ExpressFeederInput) validate() error {
+	if strings.TrimSpace(in.FeederName) == "" {
+		return fmt.Errorf("feeder_name is required")
+	}
+	if strings.TrimSpace(in.SendingMeterID) == "" {
+		return fmt.Errorf("sending_meter_id is required")
+	}
+	if strings.TrimSpace(in.ReceivingMeterID) == "" {
+		return fmt.Errorf("receiving_meter_id is required")
+	}
+	if in.SendingMeterID == in.ReceivingMeterID {
+		return fmt.Errorf("sending_meter_id and receiving_meter_id must be different meters")
+	}
+	return nil
+}
+
+func (in ExpressFeederInput) toExpressFeeder() *ExpressFeeder {
+	return &ExpressFeeder{
+		FeederName:             in.FeederName,
+		SapVersion:             in.SapVersion,
+		Comments:               in.Comments,
+		SendingMeterID:         in.SendingMeterID,
+		SendingStation:         in.SendingStation,
+		SendingTypeOfStation:   in.SendingTypeOfStation,
+		SendingCode:            in.SendingCode,
+		SendingRegion:          in.SendingRegion,
+		SendingDistrict:        in.SendingDistrict,
+		ReceivingMeterID:       in.ReceivingMeterID,
+		ReceivingStation:       in.ReceivingStation,
+		ReceivingTypeOfStation: in.ReceivingTypeOfStation,
+		ReceivingCode:          in.ReceivingCode,
+		ReceivingRegion:        in.ReceivingRegion,
+		ReceivingDistrict:      in.ReceivingDistrict,
+	}
+}
+
+// ListExpressFeeders returns a paginated, searchable list of express-feeder
+// pairings for the admin UI — unlike GetExpressFeederDailyConsumption/
+// GetExpressFeederAggregatedConsumption, this has no date range and isn't
+// joined against consumption data; it just resolves the sending/receiving
+// meter numbers for display.
+func (s *Service) ListExpressFeeders(ctx context.Context, search string, page, limit int) (*ExpressFeederListResponse, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+
+	base := s.db.NewSelect().
+		TableExpr("app.express_feeders AS f").
+		Join("LEFT JOIN app.meters AS sm ON f.sending_meter_id = sm.id").
+		Join("LEFT JOIN app.meters AS rm ON f.receiving_meter_id = rm.id").
+		Where("f.deleted_at IS NULL")
+
+	if strings.TrimSpace(search) != "" {
+		like := "%" + strings.TrimSpace(search) + "%"
+		base = base.Where(
+			"(f.feeder_name ILIKE ? OR sm.meter_number ILIKE ? OR rm.meter_number ILIKE ?)",
+			like, like, like,
+		)
+	}
+
+	total, err := base.Clone().Count(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var items []ExpressFeederListItem
+	err = base.
+		ColumnExpr("f.id AS id").
+		ColumnExpr("f.feeder_name AS feeder_name").
+		ColumnExpr("f.sap_version AS sap_version").
+		ColumnExpr("f.comments AS comments").
+		ColumnExpr("f.sending_meter_id AS sending_meter_id").
+		ColumnExpr("sm.meter_number AS sending_meter_number").
+		ColumnExpr("f.sending_station AS sending_station").
+		ColumnExpr("f.sending_type_of_station AS sending_type_of_station").
+		ColumnExpr("f.sending_code AS sending_code").
+		ColumnExpr("f.sending_region AS sending_region").
+		ColumnExpr("f.sending_district AS sending_district").
+		ColumnExpr("f.receiving_meter_id AS receiving_meter_id").
+		ColumnExpr("rm.meter_number AS receiving_meter_number").
+		ColumnExpr("f.receiving_station AS receiving_station").
+		ColumnExpr("f.receiving_type_of_station AS receiving_type_of_station").
+		ColumnExpr("f.receiving_code AS receiving_code").
+		ColumnExpr("f.receiving_region AS receiving_region").
+		ColumnExpr("f.receiving_district AS receiving_district").
+		ColumnExpr("f.created_at AS created_at").
+		ColumnExpr("f.updated_at AS updated_at").
+		OrderExpr("f.feeder_name").
+		Limit(limit).
+		Offset((page - 1) * limit).
+		Scan(ctx, &items)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &ExpressFeederListResponse{Data: items}
+	resp.Meta.Page = page
+	resp.Meta.Limit = limit
+	resp.Meta.Total = total
+	resp.Meta.Pages = int(math.Ceil(float64(total) / float64(limit)))
+	if resp.Meta.Pages < 1 {
+		resp.Meta.Pages = 1
+	}
+	return resp, nil
+}
+
+// CreateExpressFeeder inserts a new sending/receiving meter pairing.
+func (s *Service) CreateExpressFeeder(ctx context.Context, in ExpressFeederInput) (*ExpressFeeder, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	feeder := in.toExpressFeeder()
+	now := time.Now().UTC()
+	feeder.CreatedAt = &now
+	feeder.UpdatedAt = &now
+	if _, err := s.db.NewInsert().Model(feeder).Exec(ctx); err != nil {
+		return nil, err
+	}
+	return feeder, nil
+}
+
+// UpdateExpressFeeder replaces the writable fields of an existing pairing by id.
+func (s *Service) UpdateExpressFeeder(ctx context.Context, id string, in ExpressFeederInput) (*ExpressFeeder, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	feeder := in.toExpressFeeder()
+	feeder.ID = id
+	now := time.Now().UTC()
+	feeder.UpdatedAt = &now
+	res, err := s.db.NewUpdate().
+		Model(feeder).
+		Column(
+			"feeder_name", "sap_version", "comments",
+			"sending_meter_id", "sending_station", "sending_type_of_station",
+			"sending_code", "sending_region", "sending_district",
+			"receiving_meter_id", "receiving_station", "receiving_type_of_station",
+			"receiving_code", "receiving_region", "receiving_district",
+			"updated_at",
+		).
+		WherePK().
+		Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	return feeder, nil
+}
+
+// SoftDeleteExpressFeeder retires a pairing without removing its row —
+// same bun soft_delete convention as SoftDeleteMeter, so historical
+// Express Feeder dashboard queries that join against it by
+// feeder_name/sap_version keep working for date ranges before the
+// retirement.
+func (s *Service) SoftDeleteExpressFeeder(ctx context.Context, id string) error {
+	res, err := s.db.NewDelete().Model((*ExpressFeeder)(nil)).Where("id = ?", id).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Service) GetAggregated(ctx context.Context, params *AggregatedQueryParams) (*AggregatedResult, error) {
 	// 1️⃣ Build filters
 	filters := []string{"1=1"}
@@ -1635,6 +1826,7 @@ func (s *Service) GetExpressFeederDailyConsumption(
 		Join("LEFT JOIN app.meter_consumption_daily AS rmcd ON rmcd.meter_number = rm.meter_number AND rmcd.consumption_date BETWEEN ? AND ?", params.DateFrom, params.DateTo).
 		Join("LEFT JOIN app.data_item_mapping AS sdim ON smcd.data_item_id = sdim.data_item_id").
 		Join("LEFT JOIN app.data_item_mapping AS rdim ON rmcd.data_item_id = rdim.data_item_id").
+		Where("f.deleted_at IS NULL").
 		ColumnExpr("DATE(COALESCE(smcd.consumption_date, rmcd.consumption_date)) AS consumption_date").
 		ColumnExpr("f.feeder_name AS feeder_name").
 		ColumnExpr("f.sap_version AS sap_version").
@@ -1835,6 +2027,7 @@ func (s *Service) GetExpressFeederAggregatedConsumption(
 		Join("LEFT JOIN app.meter_consumption_daily AS rmcd ON rmcd.meter_number = rm.meter_number AND rmcd.consumption_date BETWEEN ? AND ?", params.DateFrom, params.DateTo).
 		Join("LEFT JOIN app.data_item_mapping AS sdim ON smcd.data_item_id = sdim.data_item_id").
 		Join("LEFT JOIN app.data_item_mapping AS rdim ON rmcd.data_item_id = rdim.data_item_id").
+		Where("f.deleted_at IS NULL").
 		ColumnExpr(periodExpr + " AS group_period").
 		ColumnExpr("f.feeder_name AS feeder_name").
 		ColumnExpr("f.sap_version AS sap_version").

@@ -125,6 +125,84 @@ func (h *Handler) SoftDeleteMeter(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"message": "meter retired"})
 }
 
+// ListExpressFeeders handles GET /api/v1/express-feeders/admin — notify-emails allowlist only.
+func (h *Handler) ListExpressFeeders(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	q := r.URL.Query()
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	resp, err := h.service.ListExpressFeeders(r.Context(), q.Get("search"), page, limit)
+	if err != nil {
+		h.logr.Error("failed to list express feeders", zap.Error(err))
+		httpx.JSON(w, http.StatusInternalServerError, "failed to list express feeders")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, resp)
+}
+
+// CreateExpressFeeder handles POST /api/v1/express-feeders/admin — notify-emails allowlist only.
+func (h *Handler) CreateExpressFeeder(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	var in ExpressFeederInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httpx.JSON(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	feeder, err := h.service.CreateExpressFeeder(r.Context(), in)
+	if err != nil {
+		h.logr.Error("failed to create express feeder", zap.Error(err))
+		httpx.JSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, feeder)
+}
+
+// UpdateExpressFeeder handles PUT /api/v1/express-feeders/admin/{id} — notify-emails allowlist only.
+func (h *Handler) UpdateExpressFeeder(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var in ExpressFeederInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httpx.JSON(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	feeder, err := h.service.UpdateExpressFeeder(r.Context(), id, in)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			httpx.JSON(w, http.StatusNotFound, "express feeder not found")
+			return
+		}
+		h.logr.Error("failed to update express feeder", zap.Error(err), zap.String("id", id))
+		httpx.JSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, feeder)
+}
+
+// SoftDeleteExpressFeeder handles DELETE /api/v1/express-feeders/admin/{id} — notify-emails allowlist only.
+func (h *Handler) SoftDeleteExpressFeeder(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if err := h.service.SoftDeleteExpressFeeder(r.Context(), id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			httpx.JSON(w, http.StatusNotFound, "express feeder not found")
+			return
+		}
+		h.logr.Error("failed to delete express feeder", zap.Error(err), zap.String("id", id))
+		httpx.JSON(w, http.StatusInternalServerError, "failed to delete express feeder")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"message": "express feeder retired"})
+}
+
 func (h *Handler) GetMeterStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	q := r.URL.Query()

@@ -13,6 +13,7 @@ import (
 	"bknd-3/internal/logger"
 	"bknd-3/internal/loginstats"
 	"bknd-3/internal/meters"
+	authmw "bknd-3/internal/middleware"
 	"bknd-3/internal/mmssales"
 	"bknd-3/internal/serviceareas"
 	"bknd-3/internal/services"
@@ -66,8 +67,13 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 	authSvc := services.NewAuthService(db, jwtMgr, cfg, logr)
 	meterMetricsSvc := services.NewMeterMetricsService(db)
 
+	// Gates the meters-admin write endpoints (Create/Update/SoftDelete) —
+	// first real use of JWTAuth in this codebase; existing /meters reads
+	// stay unauthenticated.
+	authMW := authmw.NewAuthMiddleware(jwtMgr.PublicKey(), authSvc, logr.Logger)
+
 	authHandler := handlers.NewAuthHandler(authSvc, logr, cfg)
-	meterHandler := meters.NewHandler(meters.NewService(db), logr.Logger)
+	meterHandler := meters.NewHandler(meters.NewService(db, cfg.NotifyEmails), logr.Logger)
 	meterMetricsHandler := handlers.NewMeterMetricsHandler(meterMetricsSvc, logr.Logger)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -192,6 +198,18 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 				r.Get("/counts/by-district", meterHandler.GetMeterSpatialCountsByDistrict)
 				r.Get("/counts/by-type", meterHandler.GetMeterSpatialCountsByType)
 			})
+		})
+
+		// Meter management (add/edit/retire) — notify-emails allowlist
+		// only, identity derived from the JWT session rather than a
+		// client-supplied field. Kept as its own route group (not nested
+		// under the public /meters block above) so JWTAuth only applies
+		// here.
+		r.Route("/meters/admin", func(r chi.Router) {
+			r.Use(authMW.JWTAuth)
+			r.Post("/", meterHandler.CreateMeter)
+			r.Put("/{id}", meterHandler.UpdateMeter)
+			r.Delete("/{id}", meterHandler.SoftDeleteMeter)
 		})
 
 		r.Mount("/feeders", feeders.Routes(db, logr.Logger))

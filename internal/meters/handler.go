@@ -2,6 +2,9 @@ package meters
 
 import (
 	"bknd-3/internal/httpx"
+	"bknd-3/internal/middleware"
+	"encoding/json"
+	"errors"
 
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
@@ -38,6 +41,88 @@ func (h *Handler) QueryMeters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": results})
+}
+
+// requireNotifyEmail resolves the JWT-authenticated caller's email and
+// checks it against the meters-admin allowlist, writing a 401/403 and
+// returning false if the caller isn't allowed to proceed.
+func (h *Handler) requireNotifyEmail(w http.ResponseWriter, r *http.Request) bool {
+	userID, _ := r.Context().Value(middleware.ContextUserIDKey).(string)
+	if userID == "" {
+		httpx.JSON(w, http.StatusUnauthorized, "authentication required")
+		return false
+	}
+	if _, err := h.service.ResolveNotifyEmail(r.Context(), userID); err != nil {
+		if errors.Is(err, ErrForbidden) {
+			httpx.JSON(w, http.StatusForbidden, "you are not allowed to manage meters")
+			return false
+		}
+		h.logr.Error("failed to resolve notify email", zap.Error(err), zap.String("user_id", userID))
+		httpx.JSON(w, http.StatusInternalServerError, "failed to verify permissions")
+		return false
+	}
+	return true
+}
+
+// CreateMeter handles POST /api/v1/meters/admin — notify-emails allowlist only.
+func (h *Handler) CreateMeter(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	var in MeterInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httpx.JSON(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	meter, err := h.service.CreateMeter(r.Context(), in)
+	if err != nil {
+		h.logr.Error("failed to create meter", zap.Error(err))
+		httpx.JSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, meter)
+}
+
+// UpdateMeter handles PUT /api/v1/meters/admin/{id} — notify-emails allowlist only.
+func (h *Handler) UpdateMeter(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	var in MeterInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httpx.JSON(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	meter, err := h.service.UpdateMeter(r.Context(), id, in)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			httpx.JSON(w, http.StatusNotFound, "meter not found")
+			return
+		}
+		h.logr.Error("failed to update meter", zap.Error(err), zap.String("id", id))
+		httpx.JSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpx.JSON(w, http.StatusOK, meter)
+}
+
+// SoftDeleteMeter handles DELETE /api/v1/meters/admin/{id} — notify-emails allowlist only.
+func (h *Handler) SoftDeleteMeter(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if err := h.service.SoftDeleteMeter(r.Context(), id); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			httpx.JSON(w, http.StatusNotFound, "meter not found")
+			return
+		}
+		h.logr.Error("failed to delete meter", zap.Error(err), zap.String("id", id))
+		httpx.JSON(w, http.StatusInternalServerError, "failed to delete meter")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"message": "meter retired"})
 }
 
 func (h *Handler) GetMeterStatus(w http.ResponseWriter, r *http.Request) {

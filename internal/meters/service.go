@@ -1,8 +1,10 @@
 package meters
 
 import (
+	"bknd-3/internal/models"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/uptrace/bun"
 	"math"
@@ -13,12 +15,46 @@ import (
 	"time"
 )
 
+var (
+	// ErrForbidden means the authenticated caller isn't in the meters-admin
+	// notify-emails allowlist.
+	ErrForbidden = errors.New("forbidden")
+	// ErrNotFound means the given meter id doesn't exist (or is already
+	// soft-deleted).
+	ErrNotFound = errors.New("not found")
+)
+
 type Service struct {
-	db *bun.DB
+	db           *bun.DB
+	notifyEmails map[string]struct{}
 }
 
-func NewService(db *bun.DB) *Service {
-	return &Service{db: db}
+// NewService constructs the meters service. notifyEmails gates the
+// admin-only write endpoints (Create/Update/SoftDeleteMeter) — same
+// allowlist-by-email pattern as internal/announcements, mirrored here.
+func NewService(db *bun.DB, notifyEmails []string) *Service {
+	allowed := make(map[string]struct{}, len(notifyEmails))
+	for _, e := range notifyEmails {
+		allowed[strings.ToLower(strings.TrimSpace(e))] = struct{}{}
+	}
+	return &Service{db: db, notifyEmails: allowed}
+}
+
+// ResolveNotifyEmail looks up the JWT-authenticated user's email (by id,
+// from the request context — see middleware.ContextUserIDKey) and checks
+// it against the allowlist. Unlike internal/announcements, which trusts
+// an email the client puts in the request body, this derives identity
+// from the session itself so a caller can't just claim to be someone
+// else in the allowlist.
+func (s *Service) ResolveNotifyEmail(ctx context.Context, userID string) (string, error) {
+	var u models.User
+	if err := s.db.NewSelect().Model(&u).Where("id = ?", userID).Scan(ctx); err != nil {
+		return "", err
+	}
+	if _, ok := s.notifyEmails[strings.ToLower(strings.TrimSpace(u.Email))]; !ok {
+		return "", ErrForbidden
+	}
+	return u.Email, nil
 }
 
 type MeterQueryParams struct {
@@ -205,6 +241,132 @@ func (s *Service) GetMeterByID(ctx context.Context, id string) (*Meter, error) {
 	meter := new(Meter)
 	err := s.db.NewSelect().Model(meter).Where("id = ?", id).Scan(ctx)
 	return meter, err
+}
+
+// MeterInput is the writable field set for creating or replacing a meter
+// via the admin UI — everything on Meter except ID/CreatedAt/UpdatedAt/
+// DeletedAt, which the DB/soft-delete machinery own.
+type MeterInput struct {
+	MeterNumber           string   `json:"meter_number"`
+	MeterType             string   `json:"meter_type"`
+	SPN                   *string  `json:"spn"`
+	MeterBrand            *string  `json:"meter_brand"`
+	Location              *string  `json:"location"`
+	DigitalAddress        *string  `json:"digital_address"`
+	Status                *string  `json:"status"`
+	MeteringPoint         *string  `json:"metering_point"`
+	BoundaryMeteringPoint *string  `json:"boundary_metering_point"`
+	Incomer               *string  `json:"incomer"`
+	Region                *string  `json:"region"`
+	District              *string  `json:"district"`
+	Station               *string  `json:"station"`
+	MultiplyFactor        *float64 `json:"multiply_factor"`
+	CTRatioPrimary        *float64 `json:"ct_ratio_primary"`
+	CTRatioSecondary      *float64 `json:"ct_ratio_secondary"`
+	VTRatioPrimary        *float64 `json:"vt_ratio_primary"`
+	VTRatioSecondary      *float64 `json:"vt_ratio_secondary"`
+	Latitude              *float64 `json:"latitude"`
+	Longitude             *float64 `json:"longitude"`
+	VoltageKV             *float64 `json:"voltage_kv"`
+	FeederPanelName       *string  `json:"feeder_panel_name"`
+}
+
+func (in MeterInput) validate() error {
+	if strings.TrimSpace(in.MeterNumber) == "" {
+		return fmt.Errorf("meter_number is required")
+	}
+	if strings.TrimSpace(in.MeterType) == "" {
+		return fmt.Errorf("meter_type is required")
+	}
+	return nil
+}
+
+func (in MeterInput) toMeter() *Meter {
+	return &Meter{
+		MeterNumber:           in.MeterNumber,
+		MeterType:             in.MeterType,
+		SPN:                   in.SPN,
+		MeterBrand:            in.MeterBrand,
+		Location:              in.Location,
+		DigitalAddress:        in.DigitalAddress,
+		Status:                in.Status,
+		MeteringPoint:         in.MeteringPoint,
+		BoundaryMeteringPoint: in.BoundaryMeteringPoint,
+		Incomer:               in.Incomer,
+		Region:                in.Region,
+		District:              in.District,
+		Station:               in.Station,
+		MultiplyFactor:        in.MultiplyFactor,
+		CTRatioPrimary:        in.CTRatioPrimary,
+		CTRatioSecondary:      in.CTRatioSecondary,
+		VTRatioPrimary:        in.VTRatioPrimary,
+		VTRatioSecondary:      in.VTRatioSecondary,
+		Latitude:              in.Latitude,
+		Longitude:             in.Longitude,
+		VoltageKV:             in.VoltageKV,
+		FeederPanelName:       in.FeederPanelName,
+	}
+}
+
+// CreateMeter inserts a new meter row.
+func (s *Service) CreateMeter(ctx context.Context, in MeterInput) (*Meter, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	meter := in.toMeter()
+	now := time.Now().UTC()
+	meter.CreatedAt = &now
+	meter.UpdatedAt = &now
+	if _, err := s.db.NewInsert().Model(meter).Exec(ctx); err != nil {
+		return nil, err
+	}
+	return meter, nil
+}
+
+// UpdateMeter replaces the writable fields of an existing meter by id.
+func (s *Service) UpdateMeter(ctx context.Context, id string, in MeterInput) (*Meter, error) {
+	if err := in.validate(); err != nil {
+		return nil, err
+	}
+	meter := in.toMeter()
+	meter.ID = id
+	now := time.Now().UTC()
+	meter.UpdatedAt = &now
+	res, err := s.db.NewUpdate().
+		Model(meter).
+		Column(
+			"meter_number", "meter_type", "spn", "meter_brand", "location",
+			"digital_address", "status", "metering_point",
+			"boundary_metering_point", "incomer", "region", "district",
+			"station", "multiply_factor", "ct_ratio_primary",
+			"ct_ratio_secondary", "vt_ratio_primary", "vt_ratio_secondary",
+			"latitude", "longitude", "voltage_kv", "feeder_panel_name",
+			"updated_at",
+		).
+		WherePK().
+		Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	return meter, nil
+}
+
+// SoftDeleteMeter retires a meter without removing its row — bun's
+// soft_delete tag on Meter.DeletedAt turns this into an UPDATE setting
+// deleted_at, not an actual DELETE, so historical consumption/billing
+// data that references this meter by id/meter_number is unaffected.
+func (s *Service) SoftDeleteMeter(ctx context.Context, id string) error {
+	res, err := s.db.NewDelete().Model((*Meter)(nil)).Where("id = ?", id).Exec(ctx)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Service) GetAggregated(ctx context.Context, params *AggregatedQueryParams) (*AggregatedResult, error) {

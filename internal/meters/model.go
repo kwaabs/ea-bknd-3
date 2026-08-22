@@ -35,6 +35,14 @@ type Meter struct {
 	Longitude             *float64   `json:"longitude"`
 	VoltageKV             *float64   `json:"voltage_kv"`
 	FeederPanelName       *string    `json:"feeder_panel_name"`
+
+	// DeletedAt is bun's soft-delete convention: any query built via
+	// .Model(&Meter{}) automatically gets "WHERE deleted_at IS NULL"
+	// appended, and .NewDelete().Model(...) becomes an UPDATE setting this
+	// column instead of removing the row. See SoftDeleteMeter in
+	// service.go — retiring a meter must not orphan historical
+	// consumption/billing data that references it by id/meter_number.
+	DeletedAt *time.Time `bun:",soft_delete,nullzero" json:"-"`
 }
 
 type MeterReadingDaily struct {

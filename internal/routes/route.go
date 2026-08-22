@@ -212,6 +212,18 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 			r.Delete("/{id}", meterHandler.SoftDeleteMeter)
 		})
 
+		// Express-feeder pairing CRUD — same allowlist/JWT gating as
+		// /meters/admin above. app.express_feeders pairs two meters
+		// (sending/receiving) under one feeder_name; it has no admin
+		// surface anywhere else in this codebase.
+		r.Route("/express-feeders/admin", func(r chi.Router) {
+			r.Use(authMW.JWTAuth)
+			r.Get("/", meterHandler.ListExpressFeeders)
+			r.Post("/", meterHandler.CreateExpressFeeder)
+			r.Put("/{id}", meterHandler.UpdateExpressFeeder)
+			r.Delete("/{id}", meterHandler.SoftDeleteExpressFeeder)
+		})
+
 		r.Mount("/feeders", feeders.Routes(db, logr.Logger))
 		r.Mount("/feedback", feedback.Routes(db, logr.Logger))
 

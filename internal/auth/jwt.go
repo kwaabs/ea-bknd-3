@@ -60,6 +60,13 @@ func NewJWTManager(privatePath, publicPath, issuer string) (*JWTManager, error) 
 	}, nil
 }
 
+// PublicKey exposes the RSA public key for middleware.NewAuthMiddleware,
+// which needs it to verify tokens independently of the manager that
+// issued them.
+func (m *JWTManager) PublicKey() *rsa.PublicKey {
+	return m.publicKey
+}
+
 // createJWT makes a signed JWT for given claims
 func (m *JWTManager) createJWT(userID string, kind TokenKind, ttl time.Duration, tokenVersion int, jti string, authMethod string, roles []string) (string, time.Time, error) {
 	now := time.Now().UTC()

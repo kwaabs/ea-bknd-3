@@ -44,6 +44,7 @@ import (
 	model "bknd-3/internal/models"
 	"bknd-3/internal/services"
 
+	"github.com/google/uuid"
 	"golang.org/x/term"
 )
 
@@ -119,6 +120,14 @@ func main() {
 		fmt.Printf("Password rotated for existing account %s (id %s).\n", *email, existing.ID)
 	case errors.Is(err, sql.ErrNoRows):
 		u := &model.User{
+			// Generated here rather than left zero for the DB's declared
+			// default (uuid_generate_v4()) to pick up: on this table that
+			// default doesn't actually resolve (confirmed by a live
+			// "null value in column id violates not-null constraint"
+			// failure when bun sent literal DEFAULT for it) — the model's
+			// bun tag doesn't match the real schema. Setting it explicitly
+			// sidesteps that regardless of what the column default is.
+			ID:           uuid.New(),
 			Email:        *email,
 			PasswordHash: hash,
 			Provider:     "local",

@@ -47,7 +47,7 @@ import (
 	"golang.org/x/term"
 )
 
-const minPasswordLen = 16
+const minPasswordLen = 12
 
 func main() {
 	email := flag.String("email", "", "email of the break-glass account (required)")

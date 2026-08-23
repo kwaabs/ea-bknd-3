@@ -88,10 +88,15 @@ type Bill struct {
 
 	// BillingPeriodDate is a first-of-month date derived from
 	// BillingYear/BillingMonth (kept in sync by a DB trigger). It exists so
-	// the table can be hypertable-partitioned on a real time column — see
-	// billingPeriodDateBounds in service.go. Not otherwise meaningful to API
-	// consumers, but Detail's `SELECT *` returns it, so it must be mapped
-	// here or bun's scan fails on this column.
+	// the table has a real time column to hypertable-partition on — see
+	// billingPeriodDateBounds in service.go and
+	// sql/convert_zeus_sales_hypertable.sql for the migration that
+	// establishes this (run it against your environment to actually enable
+	// partitioning; check `SELECT * FROM timescaledb_information.hypertables
+	// WHERE hypertable_name = 'zeus_sales'` if unsure whether it's applied).
+	// Not otherwise meaningful to API consumers, but Detail's `SELECT *`
+	// returns it, so it must be mapped here or bun's scan fails on this
+	// column.
 	BillingPeriodDate time.Time `bun:"billingperiod_date" json:"-"`
 
 	CreatedAt time.Time `bun:"createdat" json:"createdAt"`

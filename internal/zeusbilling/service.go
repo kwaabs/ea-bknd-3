@@ -23,11 +23,21 @@ func NewService(db *bun.DB) *Service { return &Service{db: db} }
 
 // billingPeriodDateBounds normalizes [from, to] into a half-open
 // [start, endExclusive) range over billingperiod_date — the first-of-month
-// date derived from billingyear/billingmonth and, critically, the column
-// zeus_sales is hypertable-partitioned on. Filtering on this column (rather
-// than an expression over billingyear/billingmonth) is what lets Postgres
-// exclude whole months' chunks instead of opening every chunk to check an
-// index. ok is false when both bounds are zero (no date filter requested).
+// date derived from billingyear/billingmonth and the column zeus_sales is
+// meant to be hypertable-partitioned on (see
+// sql/convert_zeus_sales_hypertable.sql; run it against your environment
+// to actually enable partitioning, and check
+// `SELECT * FROM timescaledb_information.hypertables WHERE
+// hypertable_name = 'zeus_sales'` if unsure whether it's applied — this
+// table shipped for a long time as a plain, non-partitioned table with the
+// same column, so don't assume chunk exclusion is happening without
+// checking). Filtering on this column (rather than an expression over
+// billingyear/billingmonth) is what lets Postgres exclude whole months'
+// chunks once hypertable partitioning is actually enabled — and even
+// without it, this is still the column the covering index in
+// sql/indexes_zeus_sales_map_aggregate.sql is built on, so filtering here
+// stays worthwhile either way. ok is false when both bounds are zero (no
+// date filter requested).
 func billingPeriodDateBounds(from, to time.Time) (start, endExclusive time.Time, ok bool) {
 	if from.IsZero() && to.IsZero() {
 		return time.Time{}, time.Time{}, false

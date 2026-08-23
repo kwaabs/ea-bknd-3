@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"bknd-3/internal/notifyemail"
+
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 )
@@ -18,20 +20,18 @@ var (
 
 type Service struct {
 	db           *bun.DB
-	notifyEmails map[string]struct{}
+	notifyEmails *notifyemail.Service
 }
 
-func NewService(db *bun.DB, notifyEmails []string) *Service {
-	allowed := make(map[string]struct{}, len(notifyEmails))
-	for _, e := range notifyEmails {
-		allowed[strings.ToLower(strings.TrimSpace(e))] = struct{}{}
-	}
-	return &Service{db: db, notifyEmails: allowed}
+// NewService constructs the announcements service. notifyEmails is backed
+// by the shared app.notify_emails table (internal/notifyemail) rather than
+// a static list frozen at boot.
+func NewService(db *bun.DB, notifyEmails *notifyemail.Service) *Service {
+	return &Service{db: db, notifyEmails: notifyEmails}
 }
 
-func (s *Service) IsAllowed(email string) bool {
-	_, ok := s.notifyEmails[strings.ToLower(strings.TrimSpace(email))]
-	return ok
+func (s *Service) IsAllowed(ctx context.Context, email string) (bool, error) {
+	return s.notifyEmails.IsAllowed(ctx, email)
 }
 
 func (s *Service) ListActive(ctx context.Context, limit int) ([]*Announcement, error) {
@@ -58,7 +58,11 @@ func (s *Service) Create(ctx context.Context, req *CreateAnnouncementRequest) (*
 	if body == "" || email == "" {
 		return nil, ErrBadRequest
 	}
-	if !s.IsAllowed(email) {
+	allowed, err := s.IsAllowed(ctx, email)
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
 		return nil, ErrForbidden
 	}
 
@@ -73,7 +77,7 @@ func (s *Service) Create(ctx context.Context, req *CreateAnnouncementRequest) (*
 		UpdatedAt:   now,
 	}
 
-	_, err := s.db.NewInsert().Model(row).Exec(ctx)
+	_, err = s.db.NewInsert().Model(row).Exec(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +86,14 @@ func (s *Service) Create(ctx context.Context, req *CreateAnnouncementRequest) (*
 
 func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID, email string) error {
 	email = strings.TrimSpace(strings.ToLower(email))
-	if email == "" || !s.IsAllowed(email) {
+	if email == "" {
+		return ErrForbidden
+	}
+	allowed, err := s.IsAllowed(ctx, email)
+	if err != nil {
+		return err
+	}
+	if !allowed {
 		return ErrForbidden
 	}
 

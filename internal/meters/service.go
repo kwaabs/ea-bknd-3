@@ -2,6 +2,7 @@ package meters
 
 import (
 	"bknd-3/internal/models"
+	"bknd-3/internal/notifyemail"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,18 +27,16 @@ var (
 
 type Service struct {
 	db           *bun.DB
-	notifyEmails map[string]struct{}
+	notifyEmails *notifyemail.Service
 }
 
 // NewService constructs the meters service. notifyEmails gates the
 // admin-only write endpoints (Create/Update/SoftDeleteMeter) — same
-// allowlist-by-email pattern as internal/announcements, mirrored here.
-func NewService(db *bun.DB, notifyEmails []string) *Service {
-	allowed := make(map[string]struct{}, len(notifyEmails))
-	for _, e := range notifyEmails {
-		allowed[strings.ToLower(strings.TrimSpace(e))] = struct{}{}
-	}
-	return &Service{db: db, notifyEmails: allowed}
+// allowlist-by-email pattern as internal/announcements, backed by the
+// shared app.notify_emails table (internal/notifyemail) rather than a
+// static list frozen at boot.
+func NewService(db *bun.DB, notifyEmails *notifyemail.Service) *Service {
+	return &Service{db: db, notifyEmails: notifyEmails}
 }
 
 // ResolveNotifyEmail looks up the JWT-authenticated user's email (by id,
@@ -51,7 +50,11 @@ func (s *Service) ResolveNotifyEmail(ctx context.Context, userID string) (string
 	if err := s.db.NewSelect().Model(&u).Where("id = ?", userID).Scan(ctx); err != nil {
 		return "", err
 	}
-	if _, ok := s.notifyEmails[strings.ToLower(strings.TrimSpace(u.Email))]; !ok {
+	allowed, err := s.notifyEmails.IsAllowed(ctx, u.Email)
+	if err != nil {
+		return "", err
+	}
+	if !allowed {
 		return "", ErrForbidden
 	}
 	return u.Email, nil
@@ -125,7 +128,7 @@ func parseMeterQuery(r *http.Request) MeterQueryParams {
 
 type MeterQueryResult struct {
 	Data []Meter `json:"data"`
-	Meta any            `json:"meta"`
+	Meta any     `json:"meta"`
 }
 
 type DailyConsumptionResult struct {
@@ -482,7 +485,7 @@ func (s *Service) ListExpressFeeders(ctx context.Context, search string, page, l
 		ColumnExpr("f.updated_at AS updated_at").
 		OrderExpr("f.feeder_name").
 		Limit(limit).
-		Offset((page - 1) * limit).
+		Offset((page-1)*limit).
 		Scan(ctx, &items)
 	if err != nil {
 		return nil, err
@@ -5989,14 +5992,6 @@ func (s *Service) GetDistrictTimeseriesConsumption(
 		Districts: districts,
 	}, nil
 }
-
-
-
-
-
-
-
-
 
 // Helper function to round coordinates
 func roundCoordinate(value float64, precision int) float64 {

@@ -29,6 +29,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -60,6 +61,25 @@ func main() {
 	if *email == "" {
 		fmt.Fprintln(os.Stderr, "error: -email is required")
 		flag.Usage()
+		os.Exit(1)
+	}
+
+	// Print back exactly what was received and require an explicit
+	// confirmation before touching the database. Shells (Windows/PowerShell
+	// in particular, per a live case that silently truncated an unquoted
+	// -email value's ".com" before this program ever saw it) can mangle
+	// command-line arguments in ways this program has no way to detect on
+	// its own — catching that here, before any write, is cheaper than
+	// cleaning up a wrong account afterward.
+	fmt.Fprintf(os.Stderr, "Account email: %q\n", *email)
+	if at := strings.LastIndex(*email, "@"); at == -1 || !strings.Contains((*email)[at:], ".") {
+		fmt.Fprintln(os.Stderr, "warning: no dot after the @ — if you typed a normal address, part of it may have been dropped by your shell. Try quoting it, e.g. -email=\"name@example.com\".")
+	}
+	fmt.Fprint(os.Stderr, "Proceed with this email? [y/N]: ")
+	confirmReader := bufio.NewReader(os.Stdin)
+	confirm, _ := confirmReader.ReadString('\n')
+	if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+		fmt.Fprintln(os.Stderr, "aborted — no changes made.")
 		os.Exit(1)
 	}
 

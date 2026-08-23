@@ -22,11 +22,11 @@
 // to rotate the password on the same account (matched by --email).
 //
 // Whether this account can reach admin-gated routes (e.g. /meters/admin)
-// depends on the separate app.notify_emails allowlist (internal/notifyemail)
-// checked by those handlers — this command does not add to it. Add
-// --email's value there yourself (via POST /api/v1/notify-emails, from an
-// already-allowlisted account, or a direct INSERT) if this account needs
-// admin access, not just the ability to authenticate.
+// depends on the separate app.notify_emails allowlist
+// (internal/notifyemail) checked by those handlers. This command adds
+// --email to that allowlist too by default (pass -admin=false to skip
+// it) — a break-glass account that can log in but can't actually manage
+// anything defeats the point of having one for an Entra ID outage.
 package main
 
 import (
@@ -44,6 +44,7 @@ import (
 	"bknd-3/internal/config"
 	"bknd-3/internal/database"
 	model "bknd-3/internal/models"
+	"bknd-3/internal/notifyemail"
 	"bknd-3/internal/services"
 
 	"github.com/google/uuid"
@@ -55,7 +56,8 @@ const minPasswordLen = 12
 func main() {
 	email := flag.String("email", "", "email of the break-glass account (required)")
 	name := flag.String("name", "Break Glass Admin", "display name for the account")
-	roles := flag.String("roles", "", "comma-separated roles to set on the account (optional — see app.notify_emails note above for admin-route access)")
+	roles := flag.String("roles", "", "comma-separated roles to set on the account (optional)")
+	admin := flag.Bool("admin", true, "also add the account to app.notify_emails, so it can reach admin-gated routes (not just log in)")
 	flag.Parse()
 
 	*email = strings.TrimSpace(strings.ToLower(*email))
@@ -165,11 +167,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *admin {
+		if _, err := notifyemail.NewService(db).Add(ctx, *email, "cmd/breakglass"); err != nil {
+			fmt.Fprintln(os.Stderr, "error adding to app.notify_emails:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Added to app.notify_emails — %s can reach admin-gated routes.\n", *email)
+	}
+
 	fmt.Println()
 	fmt.Println("Store this password in a vault now — it is not saved or displayed again.")
 	fmt.Println("This account authenticates via POST /api/v1/auth/login, reached from the")
 	fmt.Println(`login page by typing "breakglass" anywhere on it.`)
-	fmt.Printf("For admin-route access, add %s to app.notify_emails separately (POST /api/v1/notify-emails).\n", *email)
+	if !*admin {
+		fmt.Printf("Ran with -admin=false — %s can log in but can't reach admin routes.\n", *email)
+		fmt.Println("Add it to app.notify_emails separately (POST /api/v1/notify-emails) if that changes.")
+	}
 }
 
 func promptPassword() (string, error) {

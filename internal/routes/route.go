@@ -15,6 +15,7 @@ import (
 	"bknd-3/internal/meters"
 	authmw "bknd-3/internal/middleware"
 	"bknd-3/internal/mmssales"
+	"bknd-3/internal/notifyemail"
 	"bknd-3/internal/serviceareas"
 	"bknd-3/internal/services"
 	"bknd-3/internal/zeusbilling"
@@ -73,7 +74,8 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 	authMW := authmw.NewAuthMiddleware(jwtMgr.PublicKey(), authSvc, logr.Logger)
 
 	authHandler := handlers.NewAuthHandler(authSvc, logr, cfg)
-	meterHandler := meters.NewHandler(meters.NewService(db, cfg.NotifyEmails), logr.Logger)
+	notifyEmailSvc := notifyemail.NewService(db)
+	meterHandler := meters.NewHandler(meters.NewService(db, notifyEmailSvc), logr.Logger)
 	meterMetricsHandler := handlers.NewMeterMetricsHandler(meterMetricsSvc, logr.Logger)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -233,8 +235,17 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 			r.Get("/regional/summary", meterHandler.GetRegionalEnergyBalanceSummary)
 		})
 
+		// The shared notify-emails allowlist that gates /meters/admin,
+		// /express-feeders/admin, and /announcements' write routes — see
+		// internal/notifyemail. JWTAuth here so ContextUserIDKey is
+		// populated for every route in this package, including /me.
+		r.Route("/notify-emails", func(r chi.Router) {
+			r.Use(authMW.JWTAuth)
+			r.Mount("/", notifyemail.Routes(db, notifyEmailSvc, logr.Logger))
+		})
+
 		r.Mount("/comments", comments.Routes(db, logr.Logger))
-		r.Mount("/announcements", announcements.Routes(db, cfg, logr.Logger))
+		r.Mount("/announcements", announcements.Routes(db, notifyEmailSvc, logr.Logger))
 		r.Mount("/admin/login-stats", loginstats.Routes(db, logr.Logger))
 		r.Mount("/service-areas", serviceareas.Routes(db, logr.Logger))
 		// Same Redis response cache as Zeus/MMS consumption aggregates.

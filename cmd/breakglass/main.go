@@ -22,10 +22,11 @@
 // to rotate the password on the same account (matched by --email).
 //
 // Whether this account can reach admin-gated routes (e.g. /meters/admin)
-// depends on the separate NOTIFY_EMAILS config value checked by those
-// handlers — this command does not modify NOTIFY_EMAILS. Add --email's
-// value there yourself if this account needs admin access, not just the
-// ability to authenticate.
+// depends on the separate app.notify_emails allowlist (internal/notifyemail)
+// checked by those handlers — this command does not add to it. Add
+// --email's value there yourself (via POST /api/v1/notify-emails, from an
+// already-allowlisted account, or a direct INSERT) if this account needs
+// admin access, not just the ability to authenticate.
 package main
 
 import (
@@ -54,7 +55,7 @@ const minPasswordLen = 12
 func main() {
 	email := flag.String("email", "", "email of the break-glass account (required)")
 	name := flag.String("name", "Break Glass Admin", "display name for the account")
-	roles := flag.String("roles", "", "comma-separated roles to set on the account (optional — see NOTIFY_EMAILS note above for admin-route access)")
+	roles := flag.String("roles", "", "comma-separated roles to set on the account (optional — see app.notify_emails note above for admin-route access)")
 	flag.Parse()
 
 	*email = strings.TrimSpace(strings.ToLower(*email))
@@ -168,7 +169,7 @@ func main() {
 	fmt.Println("Store this password in a vault now — it is not saved or displayed again.")
 	fmt.Println("This account authenticates via POST /api/v1/auth/login, reached from the")
 	fmt.Println(`login page by typing "breakglass" anywhere on it.`)
-	fmt.Printf("For admin-route access, add %s to NOTIFY_EMAILS separately.\n", *email)
+	fmt.Printf("For admin-route access, add %s to app.notify_emails separately (POST /api/v1/notify-emails).\n", *email)
 }
 
 func promptPassword() (string, error) {

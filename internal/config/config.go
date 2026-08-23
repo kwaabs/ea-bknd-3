@@ -31,10 +31,6 @@ type Config struct {
 	// CORS - Add this
 	AllowedOrigins []string
 
-	// Emails allowed to post dashboard marquee announcements (and related notify features).
-	// Comma-separated via NOTIFY_EMAILS; defaults match the frontend allowlist.
-	NotifyEmails []string
-
 	// Redis cache
 	RedisURL      string        // empty disables caching
 	CacheTTLShort time.Duration // volatile ranges (include today)
@@ -48,7 +44,7 @@ func Load() *Config {
 	accessTTLMin, _ := strconv.Atoi(getEnv("ACCESS_TOKEN_MINUTES", "60"))
 	refreshTTLDays, _ := strconv.Atoi(getEnv("REFRESH_TOKEN_DAYS", "10"))
 
-	cacheTTLShortSec, _ := strconv.Atoi(getEnv("CACHE_TTL_SHORT_SECONDS", "120"))   // 2m
+	cacheTTLShortSec, _ := strconv.Atoi(getEnv("CACHE_TTL_SHORT_SECONDS", "120")) // 2m
 	cacheTTLLongSec, _ := strconv.Atoi(getEnv("CACHE_TTL_LONG_SECONDS", "21600")) // 6h
 
 	// Parse allowed origins from env (comma-separated)
@@ -56,11 +52,6 @@ func Load() *Config {
 		getEnv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173"),
 		",",
 	)
-
-	notifyEmails := parseEmailList(getEnv(
-		"NOTIFY_EMAILS",
-		"jdanso@ecggh.com,yadofo@ecggh.com",
-	))
 
 	return &Config{
 		Port:              getEnv("APP_PORT", "8780"),
@@ -77,24 +68,11 @@ func Load() *Config {
 		LDAPBindPass:   getEnv("LDAP_BIND_PASS", ""),
 		LDAPBaseDN:     getEnv("LDAP_BASE_DN", ""),
 		AllowedOrigins: allowedOrigins, // Add this
-		NotifyEmails:   notifyEmails,
 
 		RedisURL:      getEnv("REDIS_URL", ""),
 		CacheTTLShort: time.Duration(cacheTTLShortSec) * time.Second,
 		CacheTTLLong:  time.Duration(cacheTTLLongSec) * time.Second,
 	}
-}
-
-func parseEmailList(raw string) []string {
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		email := strings.TrimSpace(strings.ToLower(p))
-		if email != "" {
-			out = append(out, email)
-		}
-	}
-	return out
 }
 
 func getEnv(key, fallback string) string {

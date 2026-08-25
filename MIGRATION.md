@@ -113,3 +113,51 @@ request time. That is gone:
 
 Ingestion sequence per batch:
   raw deletes → raw inserts → resync_mms_sales_summary(range) → DeleteByPrefix.
+
+## Aggregate fast path for zeus_sales: summary + customer roster (added)
+
+`internal/zeusbilling` (app.zeus_sales, 18M+ rows) got the same treatment,
+with one structural difference from the MMS pattern above — see
+`sql/summary_zeus_sales.sql` for the full rationale:
+
+- `app.zeus_sales_period_summary` — grain: billingperiod_date (month, not
+  day — zeus_sales's real grain) × the 9 dimension columns Aggregate can
+  group by. Accelerates the SUM columns exactly like the MMS summary does.
+- `app.zeus_customer_roster` — grain: one row per distinct (accountcode,
+  servicepointcode), storing their MOST RECENT dimension values and their
+  [first, last] active billingperiod_date. Exists because
+  `customer_count` is a distinct-account count, not a row count — a
+  period-grain summary can't re-aggregate that correctly across a
+  multi-month range (a customer billed in 3 of 6 requested months would
+  get counted 3 times). This is a real gap the MMS pattern still has
+  (mmssales' own fast path runs its distinct count against the raw table,
+  per its own comment) that zeus_sales needed closed, since the reported
+  failure (a 6-month, lightly-filtered customer-sales query not loading)
+  was specifically a distinct-count-heavy case.
+- `Service.Aggregate` in `internal/zeusbilling/service.go` routes sums and
+  customer_count independently: sums use the raw table only when a
+  row-level filter is present (search / account / service point / meter
+  code / last-payment or created-at range / exact billingyear-or-month);
+  customer_count additionally falls back to the raw table when grouping by
+  billingyear/billingmonth, since the roster's single [first, last] window
+  per customer can't answer a period-scoped distinct-count.
+- Ingestion contract is the same shape as MMS's, with two functions to
+  call instead of one: after a batch's raw deletes+inserts and before
+  cache invalidation,
+
+      SELECT app.resync_zeus_sales_period_summary(:from_date, :to_date);
+      SELECT app.resync_zeus_customer_roster(:from_date, :to_date);
+
+  [:from_date, :to_date] = union of billingperiod_date values touched by
+  the batch (same contract as MMS). The roster function is more expensive
+  per call than the summary one — it re-scans each touched customer's
+  *entire* history, not just the batch's date range, because a customer's
+  first/last active period can extend outside the touched window. Cost
+  scales with (batch size × average rows per touched customer), not table
+  size.
+- Run the one-time backfill (commented at the bottom of
+  `sql/summary_zeus_sales.sql`) once after creating these — it alone fixes
+  a currently-slow wide-range query immediately, independent of whether
+  the ingestion process has been wired to call the two resync functions
+  per batch yet. Wiring that ongoing sync is out of scope for this repo:
+  the Zeus ingestion writer is an external process, same as MMS's.

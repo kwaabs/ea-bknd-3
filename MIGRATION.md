@@ -114,6 +114,38 @@ request time. That is gone:
 Ingestion sequence per batch:
   raw deletes → raw inserts → resync_mms_sales_summary(range) → DeleteByPrefix.
 
+## MMS re-sync duplicate rows (added)
+
+Observed live: the ingestion process periodically re-writes the SAME
+(meter_number, sts_credit_balance_remaining, sts_last_month_credit_read,
+sts_last_month_kwh_read) reading under a new date_time — e.g. identical
+values for one meter 2 days apart, then genuinely different values a month
+later. Every MMS query sums these figures across whatever days fall in the
+requested range, so an unflagged duplicate inflates any chart/KPI covering
+more than one of its re-sync dates.
+
+- `sql/mms_customer_sales_dedup.sql` adds `is_duplicate_reading boolean` to
+  `app.mms_customer_sales` and `app.resync_mms_duplicate_flags(from, to)`,
+  which flags every row in a (meter_number, calendar month, 3 reading
+  values) group except the one with the latest date_time. Scoped to
+  calendar month deliberately — the same reading recurring in two
+  DIFFERENT months (e.g. a vacant meter reading 0 kWh twice) is real data,
+  not a duplicate, and must not be collapsed.
+- `Service.base` (Detail, and Aggregate's raw fallback) now excludes
+  `is_duplicate_reading` rows unconditionally. `resync_mms_sales_summary`
+  (replaced in the same file) excludes them when building the daily
+  summary too, so the fast aggregate path never sums an inflated figure.
+- Ingestion sequence per batch, extending the sequence above:
+  raw deletes → raw inserts
+    → resync_mms_duplicate_flags(range)   [NEW, must run first]
+    → resync_mms_sales_summary(range)      [now duplicate-excluding]
+    → DeleteByPrefix
+- **Deployment order matters here**: `Service.base` unconditionally
+  references the new `is_duplicate_reading` column, so
+  `sql/mms_customer_sales_dedup.sql` must be applied BEFORE this backend
+  build is deployed — deploying the code first means every MMS request
+  fails until the column exists.
+
 ## Aggregate fast path for zeus_sales: summary + customer roster (added)
 
 `internal/zeusbilling` (app.zeus_sales, 18M+ rows) got the same treatment,

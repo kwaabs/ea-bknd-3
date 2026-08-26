@@ -43,8 +43,17 @@ func dimensionFilters(q *bun.SelectQuery, p FilterParams) *bun.SelectQuery {
 
 // base returns a select on the RAW sales table with all filters applied.
 // Detail always uses this; Aggregate uses it only as the row-level fallback.
+//
+// Excludes is_duplicate_reading rows (sql/mms_customer_sales_dedup.sql) —
+// the ingestion process periodically re-writes the same
+// (meter_number, month, reading values) under a new date_time, and every
+// query here sums/lists across whatever days fall in the requested range,
+// so an unflagged duplicate silently inflates any range covering more than
+// one of its re-sync dates. This exclusion is unconditional (not an opt-in
+// flag like Zeus's excludeMmsDuplicates) — there is no caller that should
+// ever want re-sync duplicates included.
 func (s *Service) base(p FilterParams) *bun.SelectQuery {
-	q := s.db.NewSelect().TableExpr(table)
+	q := s.db.NewSelect().TableExpr(table).Where("NOT is_duplicate_reading")
 	q = dimensionFilters(q, p)
 	q = dbx.In(q, "account_number", p.AccountNumber)
 	q = dbx.In(q, "meter_number", p.MeterNumber)
@@ -63,7 +72,10 @@ func (s *Service) base(p FilterParams) *bun.SelectQuery {
 // summaryBase returns a select on the pre-aggregated daily summary with the
 // dimension and date filters applied. The summary is small (one row per
 // day×dimension combo), so queries here are milliseconds regardless of how
-// large the raw table grows.
+// large the raw table grows. No separate is_duplicate_reading exclusion
+// needed here (unlike base()) — resync_mms_sales_summary
+// (sql/mms_customer_sales_dedup.sql) already excludes flagged rows when
+// building the summary, so it never contains their inflated sums.
 func (s *Service) summaryBase(p FilterParams) *bun.SelectQuery {
 	q := s.db.NewSelect().TableExpr(summaryTable)
 	q = dimensionFilters(q, p)

@@ -135,7 +135,12 @@ func (h *Handler) Aggregate(w http.ResponseWriter, r *http.Request) {
 		groupBy = []string{"regionname"}
 	}
 
-	result, err := h.svc.Aggregate(r.Context(), params, groupBy)
+	// SCOPE: only the views that blend Zeus Prepaid with MMS into one
+	// combined figure should ever send this — see the comment on
+	// Service.Aggregate and sql/zeus_prepaid_mms_precedence.sql.
+	excludeMmsDuplicates := q.Get("excludeMmsDuplicates") == "true"
+
+	result, err := h.svc.Aggregate(r.Context(), params, groupBy, excludeMmsDuplicates)
 	if err != nil {
 		h.log.Error("zeus billing aggregate failed", zap.Error(err))
 		httpx.Error(w, http.StatusInternalServerError, "internal error")

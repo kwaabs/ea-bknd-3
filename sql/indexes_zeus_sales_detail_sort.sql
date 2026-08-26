@@ -1,0 +1,75 @@
+-- Service.Detail (internal/zeusbilling/service.go) always scans the raw
+-- app.zeus_sales table via base(p) — it has no fast path onto the period
+-- summary / customer roster built for Aggregate() in
+-- sql/summary_zeus_sales.sql (those only serve grouped sums/counts, not a
+-- paginated row listing). Reported slow:
+--   GET /meters/consumption/zeus-billing/detail?meterModelType=Postpaid
+--       &billDateFrom=2026-01-01&billDateTo=2026-06-30
+--       &sortBy=billconsumptionvalue&sortDir=desc&page=1&limit=50
+-- i.e.
+--   SELECT * FROM app.zeus_sales
+--   WHERE (lower(metermodeltype) IN ('postpaid'))
+--     AND (billingperiod_date >= '2026-01-01' AND billingperiod_date < '2026-07-01')
+--   ORDER BY billconsumptionvalue DESC NULLS LAST, accountcode ASC, servicepointcode ASC
+--   LIMIT 50 OFFSET 0
+--
+-- This isn't an edge case: customer-sales-detail.tsx's Customer Records
+-- table defaults to initialSortField="billConsumptionValue",
+-- initialSortOrder="desc" with no region selected — so this exact shape is
+-- what runs on the first load of every Postpaid/Prepaid tab.
+--
+-- No existing index supports it. idx_zeus_sales_metermodeltype_billingperiod
+-- (billingperiod_date, lower(metermodeltype)) can narrow the WHERE, but
+-- provides no ordering on billconsumptionvalue — Postgres still has to sort
+-- every matching row (a large fraction of the table, since there's no
+-- region filter here) before it can return the top 50.
+--
+-- Fix: an index whose leading columns exactly match the ORDER BY, so
+-- Postgres can walk it in the requested order and stop at LIMIT instead of
+-- sorting the whole matching set. billingperiod_date is deliberately left
+-- out of the index (see below) and applied as a filter while walking:
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_zeus_sales_metermodeltype_consumption
+--       ON app.zeus_sales (lower(metermodeltype), billconsumptionvalue DESC NULLS LAST,
+--                           accountcode, servicepointcode);
+--
+-- Why billingperiod_date isn't in the index: putting it between
+-- metermodeltype and billconsumptionvalue (to speed up the range filter)
+-- would break the very thing this index exists for — within one
+-- metermodeltype, a date-range condition would only leave the index
+-- globally sorted by billconsumptionvalue *within each date value*, not
+-- across the whole requested range, so Postgres would still need an
+-- explicit Sort step. Left out entirely, the index instead lets Postgres
+-- scan in billconsumptionvalue DESC order and reject out-of-range rows as
+-- it goes (visible in EXPLAIN as an Index Scan with a Filter, not a
+-- Recheck), stopping once 50 qualifying rows are found — cheap as long as
+-- the requested date range covers a reasonable share of the metermodeltype's
+-- history, which a 6-month range does against this table's ~18-24 months.
+-- A narrow range (a single day/week) combined with this sort would still
+-- have to skip more disqualified rows per match, though never worse than
+-- today's full sort.
+--
+-- This targets only the one reported, confirmed-default sort column
+-- (billconsumptionvalue). Detail's other whitelisted sort columns
+-- (createdat, billamount, amountdue, debtamount, customername — see
+-- detailSortCols) get the same problem under the same "wide range, no
+-- region" shape, but aren't indexed here to avoid speculative index bloat
+-- on an 18M+-row, still-growing table; repeat this same pattern
+-- (lower(metermodeltype), <column> <dir> NULLS LAST/FIRST, accountcode,
+-- servicepointcode) for any of them once actually reported slow.
+--
+-- Not verified against the live table (no DB access from this session) —
+-- please run EXPLAIN ANALYZE on the query above before and after applying,
+-- and confirm the plan switches from a Sort node over a large row count to
+-- an Index Scan on this index.
+--
+-- On a large live table, prefer CREATE INDEX CONCURRENTLY (cannot run
+-- inside a transaction, so run this statement by itself if the table has
+-- live traffic):
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_zeus_sales_metermodeltype_consumption
+--       ON app.zeus_sales (lower(metermodeltype), billconsumptionvalue DESC NULLS LAST,
+--                           accountcode, servicepointcode);
+
+CREATE INDEX IF NOT EXISTS idx_zeus_sales_metermodeltype_consumption
+    ON app.zeus_sales (lower(metermodeltype), billconsumptionvalue DESC NULLS LAST,
+                        accountcode, servicepointcode);

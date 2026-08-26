@@ -278,7 +278,17 @@ var validGroupBy = map[string]bool{
 // All four combinations of (sums path) × (count path) are possible and
 // produce identical numbers to the all-raw path for the filters/groupings
 // they share — this is purely a performance routing, not a behavior change.
-func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []string) (*AggregateResult, error) {
+//
+// excludeMmsPrepaidDuplicates applies the confirmed MMS-takes-precedence
+// business rule (sql/zeus_prepaid_mms_precedence.sql): a Zeus Prepaid row
+// whose metercode matches a known MMS meter_number is excluded from sums
+// and customer_count. Only meaningful for meterModelType=Prepaid queries —
+// harmless no-op otherwise, since MMS never matches Postpaid/AMR rows.
+// SCOPE: only pass true from the two views that BLEND Zeus Prepaid and MMS
+// into one combined figure (Prepaid hub page, customer-sales-overview's
+// Combined chart/table) — every other caller of this endpoint wants Zeus's
+// own complete book of record and must keep passing false.
+func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []string, excludeMmsPrepaidDuplicates bool) (*AggregateResult, error) {
 	var groups []string
 	for _, g := range groupBy {
 		g = strings.ToLower(strings.TrimSpace(g))
@@ -298,17 +308,17 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 	go func() {
 		defer wg.Done()
 		if rowLevel {
-			data, scanErr = s.rawSums(ctx, p, groups)
+			data, scanErr = s.rawSums(ctx, p, groups, excludeMmsPrepaidDuplicates)
 		} else {
-			data, scanErr = s.summarySums(ctx, p, groups)
+			data, scanErr = s.summarySums(ctx, p, groups, excludeMmsPrepaidDuplicates)
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		if rowLevel || groupsIncludePeriod(groups) {
-			counts, countErr = s.distinctCustomerCounts(ctx, p, groups)
+			counts, countErr = s.distinctCustomerCounts(ctx, p, groups, excludeMmsPrepaidDuplicates)
 		} else {
-			counts, countErr = s.distinctCustomerCountsFromRoster(ctx, p, groups)
+			counts, countErr = s.distinctCustomerCountsFromRoster(ctx, p, groups, excludeMmsPrepaidDuplicates)
 		}
 	}()
 	wg.Wait()
@@ -334,10 +344,23 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 	return &AggregateResult{Data: data, Total: len(data)}, nil
 }
 
+// mmsDuplicateExistsExpr is the raw-row predicate matching
+// sql/zeus_prepaid_mms_precedence.sql's resync-time exclusion: a Prepaid
+// row whose metercode is a known MMS meter_number. Used only on the raw
+// fallback paths (rawSums, distinctCustomerCounts) — the summary/roster
+// fast paths read pre-computed exclusion columns instead, since this EXISTS
+// check is too expensive to run per request at raw-table scale.
+const mmsDuplicateExistsExpr = "lower(metermodeltype) = 'prepaid' AND EXISTS " +
+	"(SELECT 1 FROM app.mms_customer_sales m WHERE upper(trim(m.meter_number)) = upper(trim(zeus_sales.metercode)))"
+
 // rawSums aggregates the raw table directly — the fallback path, used
 // whenever a row-level filter is present.
-func (s *Service) rawSums(ctx context.Context, p FilterParams, groups []string) ([]AggregateRow, error) {
-	q := s.base(p).
+func (s *Service) rawSums(ctx context.Context, p FilterParams, groups []string, excludeMmsDup bool) ([]AggregateRow, error) {
+	q := s.base(p)
+	if excludeMmsDup {
+		q = q.Where("NOT (" + mmsDuplicateExistsExpr + ")")
+	}
+	q = q.
 		ColumnExpr("'ZeusBilling' AS data_src").
 		ColumnExpr("COALESCE(ROUND(SUM(billamount)::numeric, 2), 0) AS sum_billamount").
 		ColumnExpr("COALESCE(ROUND(SUM(amountdue)::numeric, 2), 0) AS sum_amountdue").
@@ -364,15 +387,23 @@ func (s *Service) rawSums(ctx context.Context, p FilterParams, groups []string) 
 // Numerically identical to rawSums for any filter/groupBy combination that
 // doesn't require a row-level filter, since the summary's SUM columns are
 // themselves just SUMs of the raw columns per (month, dimensions).
-func (s *Service) summarySums(ctx context.Context, p FilterParams, groups []string) ([]AggregateRow, error) {
+// excludeMmsDup switches to the _excl_mms_dup sibling columns
+// (sql/zeus_prepaid_mms_precedence.sql), pre-computed at resync time.
+func (s *Service) summarySums(ctx context.Context, p FilterParams, groups []string, excludeMmsDup bool) ([]AggregateRow, error) {
+	sumCol := func(base string) string {
+		if excludeMmsDup {
+			return base + "_excl_mms_dup"
+		}
+		return base
+	}
 	q := s.summaryBase(p).
 		ColumnExpr("'ZeusBilling' AS data_src").
-		ColumnExpr("COALESCE(ROUND(SUM(sum_billamount)::numeric, 2), 0) AS sum_billamount").
-		ColumnExpr("COALESCE(ROUND(SUM(sum_amountdue)::numeric, 2), 0) AS sum_amountdue").
-		ColumnExpr("COALESCE(ROUND(SUM(sum_debtamount)::numeric, 2), 0) AS sum_debtamount").
-		ColumnExpr("COALESCE(ROUND(SUM(sum_outstandingamount)::numeric, 2), 0) AS sum_outstandingamount").
-		ColumnExpr("COALESCE(ROUND(SUM(sum_billconsumptionvalue)::numeric, 2), 0) AS sum_billconsumptionvalue").
-		ColumnExpr("COALESCE(ROUND(SUM(sum_paymentsamount)::numeric, 2), 0) AS sum_paymentsamount")
+		ColumnExpr("COALESCE(ROUND(SUM(" + sumCol("sum_billamount") + ")::numeric, 2), 0) AS sum_billamount").
+		ColumnExpr("COALESCE(ROUND(SUM(" + sumCol("sum_amountdue") + ")::numeric, 2), 0) AS sum_amountdue").
+		ColumnExpr("COALESCE(ROUND(SUM(" + sumCol("sum_debtamount") + ")::numeric, 2), 0) AS sum_debtamount").
+		ColumnExpr("COALESCE(ROUND(SUM(" + sumCol("sum_outstandingamount") + ")::numeric, 2), 0) AS sum_outstandingamount").
+		ColumnExpr("COALESCE(ROUND(SUM(" + sumCol("sum_billconsumptionvalue") + ")::numeric, 2), 0) AS sum_billconsumptionvalue").
+		ColumnExpr("COALESCE(ROUND(SUM(" + sumCol("sum_paymentsamount") + ")::numeric, 2), 0) AS sum_paymentsamount")
 	for _, g := range groups {
 		selectExpr, groupExpr := summaryGroupExprs(g)
 		q = q.ColumnExpr(selectExpr).GroupExpr(groupExpr)
@@ -394,8 +425,12 @@ func (s *Service) summarySums(ctx context.Context, p FilterParams, groups []stri
 // to distinct (accountcode, servicepointcode) before counting. The
 // raw-table fallback, used for row-level-filtered queries and for any
 // query grouping by billingyear/billingmonth.
-func (s *Service) distinctCustomerCounts(ctx context.Context, p FilterParams, groups []string) ([]AggregateRow, error) {
-	inner := s.base(p).
+func (s *Service) distinctCustomerCounts(ctx context.Context, p FilterParams, groups []string, excludeMmsDup bool) ([]AggregateRow, error) {
+	inner := s.base(p)
+	if excludeMmsDup {
+		inner = inner.Where("NOT (" + mmsDuplicateExistsExpr + ")")
+	}
+	inner = inner.
 		ColumnExpr("accountcode").
 		ColumnExpr("servicepointcode").
 		GroupExpr("accountcode").
@@ -424,9 +459,14 @@ func (s *Service) distinctCustomerCounts(ctx context.Context, p FilterParams, gr
 // customer count rather than the bill count, instead of the two-level
 // GROUP BY distinctCustomerCounts needs to run against raw rows. Only
 // called when groups excludes billingyear/billingmonth — see
-// groupsIncludePeriod.
-func (s *Service) distinctCustomerCountsFromRoster(ctx context.Context, p FilterParams, groups []string) ([]AggregateRow, error) {
-	q := s.rosterBase(p).ColumnExpr("COUNT(*) AS customer_count")
+// groupsIncludePeriod. excludeMmsDup filters out roster rows flagged
+// has_mms_duplicate (sql/zeus_prepaid_mms_precedence.sql).
+func (s *Service) distinctCustomerCountsFromRoster(ctx context.Context, p FilterParams, groups []string, excludeMmsDup bool) ([]AggregateRow, error) {
+	q := s.rosterBase(p)
+	if excludeMmsDup {
+		q = q.Where("NOT has_mms_duplicate")
+	}
+	q = q.ColumnExpr("COUNT(*) AS customer_count")
 	for _, g := range groups {
 		selectExpr, groupExpr := summaryGroupExprs(g)
 		q = q.ColumnExpr(selectExpr).GroupExpr(groupExpr)

@@ -193,3 +193,29 @@ with one structural difference from the MMS pattern above — see
   the ingestion process has been wired to call the two resync functions
   per batch yet. Wiring that ongoing sync is out of scope for this repo:
   the Zeus ingestion writer is an external process, same as MMS's.
+
+## zeus-billing/detail sort index (added)
+
+The fast path above only covers `Service.Aggregate` (grouped sums/counts).
+`Service.Detail` — the paginated Customer Records row listing — always
+scans `app.zeus_sales` directly via `base(p)` and was never given a fast
+path, so a wide, region-unfiltered `Detail` call still forces a full sort
+of every matching row before returning one page. Reported slow:
+a `meterModelType=Postpaid`, 6-month range, `sortBy=billconsumptionvalue
+desc` call — which isn't an edge case, since that's
+`customer-sales-detail.tsx`'s default sort with no region selected, i.e.
+what runs on every first load of the Postpaid/Prepaid tab.
+
+`sql/indexes_zeus_sales_detail_sort.sql` adds
+`idx_zeus_sales_metermodeltype_consumption` on
+`(lower(metermodeltype), billconsumptionvalue DESC NULLS LAST, accountcode,
+servicepointcode)` — deliberately without `billingperiod_date`, so
+Postgres can walk the index already in the requested sort order and stop
+at `LIMIT`, filtering out-of-range rows as it goes, instead of sorting the
+whole matching set first. See that file's header for the full reasoning,
+including why the date range isn't part of the index and the tradeoff that
+implies for narrow date ranges. Only `billconsumptionvalue` (the reported
+and default case) is indexed; `detailSortCols`' other sort columns
+(`createdat`, `billamount`, `amountdue`, `debtamount`, `customername`) can
+get the same treatment if/when they're reported slow too — not added
+speculatively here.

@@ -4,6 +4,7 @@ import (
 	"bknd-3/internal/amrcustomer"
 	"bknd-3/internal/announcements"
 	"bknd-3/internal/auth"
+	"bknd-3/internal/botconsumption"
 	"bknd-3/internal/cache"
 	"bknd-3/internal/comments"
 	"bknd-3/internal/config"
@@ -186,6 +187,9 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 				// New, improved Zeus source data (app.zeus_sales) — additive,
 				// does not read from or replace customer-sales-zeus above.
 				r.Mount("/zeus-billing", zeusbilling.Routes(db, logr.Logger))
+				// Bot-ingested consumption source (app.bot_consumption) —
+				// independent of Zeus/MMS/AMR, no shared keys with either.
+				r.Mount("/bot-consumption", botconsumption.Routes(db, logr.Logger))
 			})
 
 			// ✅ NEW: Spatial service area routes

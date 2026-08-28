@@ -6,6 +6,7 @@ import (
 	"bknd-3/internal/database"
 	"bknd-3/internal/logger"
 	"bknd-3/internal/routes"
+	"bknd-3/internal/scheduler"
 	"context"
 	"go.uber.org/zap"
 	"net/http"
@@ -45,7 +46,11 @@ func main() {
 		}
 	}
 
-	r := routes.NewRouter(db, cfg, logr, c)
+	r, authSvc := routes.NewRouter(db, cfg, logr, c)
+
+	schedulerCtx, stopScheduler := context.WithCancel(context.Background())
+	defer stopScheduler()
+	scheduler.StartDailySessionReset(schedulerCtx, authSvc, logr)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,

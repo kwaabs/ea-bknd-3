@@ -32,7 +32,7 @@ import (
 	"github.com/go-chi/cors"
 )
 
-func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cache) http.Handler {
+func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cache) (http.Handler, *services.AuthService) {
 	r := chi.NewRouter()
 
 	// Response cache for heavy, idempotent GET endpoints. No-op when c is nil.
@@ -253,5 +253,5 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 
 	})
 
-	return r
+	return r, authSvc
 }

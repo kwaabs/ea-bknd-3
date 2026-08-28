@@ -2,7 +2,9 @@ package botconsumption
 
 import (
 	"context"
+	"strconv"
 	"strings"
+	"time"
 
 	"bknd-3/internal/dbx"
 	"bknd-3/internal/httpx"
@@ -11,6 +13,45 @@ import (
 )
 
 const table = "app.bot_consumption"
+
+// monthByName maps a lowercase month name to its time.Month, for parsing
+// billmonth labels ("june-2026"). Deliberately independent of Go's own
+// "January" layout parsing, which requires exact capitalization — this
+// matches any case the source data happens to use.
+var monthByName = map[string]time.Month{
+	"january": time.January, "february": time.February, "march": time.March,
+	"april": time.April, "may": time.May, "june": time.June,
+	"july": time.July, "august": time.August, "september": time.September,
+	"october": time.October, "november": time.November, "december": time.December,
+}
+
+// parseBillMonth parses a "monthname-year" label into the first of that
+// month (UTC, day is arbitrary — only year/month are ever read back out via
+// monthKey). Returns ok=false for anything that doesn't match this shape
+// rather than an error: a single malformed label in the table must never
+// fail every date-range query, just be silently excluded from the match.
+func parseBillMonth(raw string) (t time.Time, ok bool) {
+	parts := strings.SplitN(strings.TrimSpace(raw), "-", 2)
+	if len(parts) != 2 {
+		return time.Time{}, false
+	}
+	month, found := monthByName[strings.ToLower(strings.TrimSpace(parts[0]))]
+	if !found {
+		return time.Time{}, false
+	}
+	year, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Date(year, month, 1, 0, 0, 0, 0, time.UTC), true
+}
+
+// monthKey reduces a time.Time to a single comparable int (year*12+month),
+// so two months can be range-compared regardless of day/time-of-day.
+func monthKey(t time.Time) int {
+	y, m, _ := t.Date()
+	return y*12 + int(m)
+}
 
 type Service struct {
 	db *bun.DB
@@ -44,9 +85,58 @@ func (s *Service) base(p FilterParams) *bun.SelectQuery {
 	return q
 }
 
+// resolveDateRangeToBillMonths translates p.DateFrom/DateTo into a
+// BillMonth filter, since billmonth is the only time dimension this table
+// has and it's a free-text "monthname-year" label, not a real date column
+// — matching it against a date range means parsing every distinct label
+// and comparing at month granularity, not building a SQL date-range WHERE.
+// No-op (returns p unchanged) if BillMonth was already given explicitly —
+// that takes precedence — or if both DateFrom and DateTo are zero.
+//
+// Fetches the table's distinct billmonth values (expected to stay a small
+// set — one label per calendar month the source has ever sent) and matches
+// each in Go via parseBillMonth rather than parsing month names in SQL, so
+// one malformed label can't fail the whole query.
+func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterParams) (FilterParams, error) {
+	if len(p.BillMonth) > 0 || (p.DateFrom.IsZero() && p.DateTo.IsZero()) {
+		return p, nil
+	}
+
+	var raw []string
+	if err := s.db.NewSelect().
+		TableExpr(table).
+		ColumnExpr("DISTINCT billmonth").
+		Scan(ctx, &raw); err != nil {
+		return p, err
+	}
+
+	matched := make([]string, 0, len(raw))
+	for _, r := range raw {
+		t, ok := parseBillMonth(r)
+		if !ok {
+			continue
+		}
+		k := monthKey(t)
+		if !p.DateFrom.IsZero() && k < monthKey(p.DateFrom) {
+			continue
+		}
+		if !p.DateTo.IsZero() && k > monthKey(p.DateTo) {
+			continue
+		}
+		matched = append(matched, r)
+	}
+
+	p.BillMonth = matched
+	return p, nil
+}
+
 // Detail returns a page of matching rows. The select and its count run
 // concurrently inside dbx.Paginate.
 func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Pagination) (*dbx.Page[Reading], error) {
+	p, err := s.resolveDateRangeToBillMonths(ctx, p)
+	if err != nil {
+		return nil, err
+	}
 	q := s.base(p).
 		ColumnExpr("customer_name, meternumber, geo_code, kwh, tarrif, billmonth, district").
 		ColumnExpr("trim(region) AS region").
@@ -79,6 +169,10 @@ func groupExpr(g string) (selectExpr, groupByExpr string, ok bool) {
 // hashes fine alongside the other aggregates without the composite-key cost
 // noted on zeusbilling's equivalent.
 func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []string) (*AggregateResult, error) {
+	p, err := s.resolveDateRangeToBillMonths(ctx, p)
+	if err != nil {
+		return nil, err
+	}
 	q := s.base(p).
 		ColumnExpr("COUNT(DISTINCT meternumber) AS customer_count").
 		ColumnExpr("COALESCE(ROUND(SUM(kwh)::numeric, 2), 0) AS sum_kwh")

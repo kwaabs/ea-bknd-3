@@ -1,9 +1,13 @@
 // Package botconsumption is a self-contained domain package: models,
 // service, handler, and routes for app.bot_consumption — a bot-ingested
 // customer consumption source, structurally independent of Zeus/MMS/AMR
-// (no shared keys, no date column, just a flat reading per customer per
-// bill month).
+// (no shared keys, just a flat reading per customer per bill month). There
+// is no real date/timestamp column, only billmonth, a free-text
+// "monthname-year" label with month precision only — see
+// FilterParams.DateFrom/DateTo and Service.resolveDateRangeToBillMonths.
 package botconsumption
+
+import "time"
 
 // Reading mirrors a row from app.bot_consumption. Field names fix the
 // source table's typos/abbreviations (tarrif -> Tariff, meternumber ->
@@ -21,9 +25,7 @@ type Reading struct {
 
 // FilterParams holds row-level filters shared by detail and aggregate.
 // Pagination is NOT here — it travels as httpx.Pagination, parsed and
-// clamped once in the handler. There is no date-range filter: billmonth is
-// a free-text label ("june-2026"), not a real date column, so it's filtered
-// like any other dimension rather than parsed into a range.
+// clamped once in the handler.
 type FilterParams struct {
 	Region      []string
 	District    []string
@@ -31,6 +33,17 @@ type FilterParams struct {
 	BillMonth   []string
 	MeterNumber []string
 	Search      string
+
+	// DateFrom/DateTo are the app-wide dateFrom/dateTo filter, accepted for
+	// consistency with every other page's date picker — but this table has
+	// no real date column, only billmonth ("june-2026", month precision
+	// only). Service.resolveDateRangeToBillMonths translates whatever range
+	// is given into the set of billmonth labels it overlaps, so any
+	// day-of-month here is ignored entirely: dateFrom=2026-06-15 and
+	// dateFrom=2026-06-01 behave identically, both meaning "from June 2026
+	// onward". Ignored if BillMonth is already set explicitly.
+	DateFrom time.Time
+	DateTo   time.Time
 }
 
 // AggregateRow is a single grouped aggregate row.

@@ -300,8 +300,16 @@ Two things worth knowing about this table specifically:
   region-naming mismatch this session hit repeatedly with Zeus/MMS, just
   caused by the column type here instead of the source data.
 - There's no real date column — `billmonth` is a free-text label
-  (`"june-2026"`), not a date/timestamp — so `FilterParams` has no date
-  range, only a `billMonth` dimension filter like any other.
+  (`"june-2026"`), not a date/timestamp. `Detail`/`Aggregate` still accept
+  the app-wide `dateFrom`/`dateTo` params for consistency with every other
+  page's date picker, but `Service.resolveDateRangeToBillMonths` treats
+  them as **month-precision only**: it fetches the table's distinct
+  `billmonth` labels, parses each ("monthname-year", case-insensitive) via
+  `parseBillMonth`, and keeps whichever whole months the requested range
+  touches — so `dateFrom=2026-06-15` behaves identically to
+  `dateFrom=2026-06-01`. A malformed label is skipped rather than failing
+  the request. An explicit `billMonth` param always takes precedence over
+  `dateFrom`/`dateTo` if both are given.
 
 No summary/fast-path table yet (this source starts small) and no indexes
 added — both are the kind of thing this session only added in response to a

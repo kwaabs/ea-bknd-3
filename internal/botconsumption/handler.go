@@ -18,9 +18,19 @@ func NewHandler(svc *Service, log *zap.Logger) *Handler {
 	return &Handler{svc: svc, log: log}
 }
 
-// parseFilters is the single place query params become FilterParams. No
-// error path — unlike Zeus/MMS there are no date params to validate.
-func parseFilters(q url.Values) FilterParams {
+// parseFilters is the single place query params become FilterParams.
+// dateFrom/dateTo are the app-wide date-range params — Service resolves
+// them to the billmonth labels they cover (month precision only, see
+// FilterParams.DateFrom/DateTo).
+func parseFilters(q url.Values) (FilterParams, error) {
+	from, err := httpx.Date(q, "dateFrom")
+	if err != nil {
+		return FilterParams{}, err
+	}
+	to, err := httpx.Date(q, "dateTo")
+	if err != nil {
+		return FilterParams{}, err
+	}
 	return FilterParams{
 		Region:      httpx.CSV(q, "region"),
 		District:    httpx.CSV(q, "district"),
@@ -28,12 +38,18 @@ func parseFilters(q url.Values) FilterParams {
 		BillMonth:   httpx.CSV(q, "billMonth"),
 		MeterNumber: httpx.CSV(q, "meterNumber"),
 		Search:      q.Get("search"),
-	}
+		DateFrom:    from,
+		DateTo:      to,
+	}, nil
 }
 
 func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	params := parseFilters(q)
+	params, err := parseFilters(q)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid date: use YYYY-MM-DD")
+		return
+	}
 	pg := httpx.ParsePagination(q, 50, 500)
 
 	result, err := h.svc.Detail(r.Context(), params, pg)
@@ -47,7 +63,11 @@ func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Aggregate(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	params := parseFilters(q)
+	params, err := parseFilters(q)
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid date: use YYYY-MM-DD")
+		return
+	}
 
 	groupBy := httpx.CSV(q, "groupBy")
 	if len(groupBy) == 0 {

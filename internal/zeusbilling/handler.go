@@ -74,7 +74,7 @@ func parseFilters(q url.Values) (FilterParams, error) {
 	}
 
 	return FilterParams{
-		RegionName:          httpx.CSV(q, "region"),
+		RegionName:          normalizeZeusRegionNames(httpx.CSV(q, "region")),
 		DistrictName:        httpx.CSV(q, "district"),
 		TariffClassCode:     httpx.CSV(q, "tariffClassCode"),
 		ServiceClass:        httpx.CSV(q, "serviceClass"),

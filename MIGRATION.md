@@ -250,3 +250,35 @@ extension enabled. Safe to run on more than one server instance
 simultaneously: both UPDATEs are effectively idempotent (a redundant
 token_version bump or an already-revoked refresh_tokens row is harmless),
 so no distributed lock was added.
+
+## zeus-billing region filter normalization (added)
+
+`app.zeus_sales.regionname` always stores the administrative-unit-qualified
+form ("Tema Region", "Accra East Region") — confirmed against live data:
+`region=Tema` returns nothing, `region=Tema Region` returns real rows. Every
+other source of a region value in this system (the meter table, the
+frontend's region-select options, callers sending the short form) uses the
+unqualified form ("Tema", "Accra East"), so an unqualified filter value
+silently matched zero rows.
+
+`parseFilters` in `internal/zeusbilling/handler.go` now runs every incoming
+`region` value through `normalizeZeusRegionNames` (`internal/zeusbilling/service.go`)
+before it becomes part of `FilterParams` — appends " Region" to any value
+that doesn't already end with it (case-insensitively), so it's a no-op on a
+value that's already correctly qualified. This is the single point where
+query params become `FilterParams` (see `parseFilters`'s own doc comment),
+so both `base()`'s and `dimensionFilters()`'s `regionname` filters get the
+normalized value automatically — no separate fix needed at either call site.
+
+Frontend pages that resolve a region against Zeus's own known region-name
+list first (`useResolvedRegionName`, e.g. region-detail.tsx, district-detail.tsx)
+already send the correctly-qualified form and are unaffected either way —
+this is now normalized on the server regardless of what a caller sends, so
+those pages don't strictly need to keep doing that resolution for Zeus
+specifically, though there's no harm in leaving it (MMS's own regionname
+convention is unrelated and still needs it independently).
+
+`internal/zeussales` (targets the older, deprecated `app.customer_sales_zeus`
+table, still mounted at `/customer-sales-zeus`) has the identical
+`regionname` filter pattern but was deliberately left untouched — it's not
+the endpoint in active use.

@@ -282,3 +282,29 @@ convention is unrelated and still needs it independently).
 table, still mounted at `/customer-sales-zeus`) has the identical
 `regionname` filter pattern but was deliberately left untouched — it's not
 the endpoint in active use.
+
+## New source: bot_consumption (added)
+
+`internal/botconsumption` is a new, independent domain package for
+`app.bot_consumption` — a bot-ingested customer consumption source with no
+shared keys or relationship to Zeus/MMS/AMR. Mounted at
+`/meters/consumption/bot-consumption` (`detail`, `aggregate`), same shape as
+`mmssales`/`zeusbilling`: `FilterParams` → `base()` → `Detail`/`Aggregate`.
+
+Two things worth knowing about this table specifically:
+
+- `region` is declared `bpchar(15)`, so Postgres stores and returns it
+  blank-padded to the full column width (e.g. `"ACCRA WEST     "`).
+  `trim(region)` is used everywhere the column is filtered or grouped by,
+  so callers never see or have to match the padding — the same class of
+  region-naming mismatch this session hit repeatedly with Zeus/MMS, just
+  caused by the column type here instead of the source data.
+- There's no real date column — `billmonth` is a free-text label
+  (`"june-2026"`), not a date/timestamp — so `FilterParams` has no date
+  range, only a `billMonth` dimension filter like any other.
+
+No summary/fast-path table yet (this source starts small) and no indexes
+added — both are the kind of thing this session only added in response to a
+confirmed slow query on the other sources, not proactively at
+table-introduction time. Revisit once real data volume and query patterns
+are known.

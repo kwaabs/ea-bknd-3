@@ -219,3 +219,34 @@ and default case) is indexed; `detailSortCols`' other sort columns
 (`createdat`, `billamount`, `amountdue`, `debtamount`, `customername`) can
 get the same treatment if/when they're reported slow too — not added
 speculatively here.
+
+## Daily forced logout (added)
+
+`internal/scheduler/session_reset.go` starts a goroutine in `cmd/server/main.go`
+that force-logs-out every user once a day at 00:00 UTC (== 00:00 in Ghana,
+no DST), calling the new `AuthService.ResetAllSessions`
+(`internal/services/auth.go`). No DB function or schema change was needed —
+the existing auth design already made this possible with two statements:
+
+- `UPDATE app.users SET token_version = token_version + 1` — every
+  currently-issued access token is checked against this column on every
+  request (`middleware.JWTAuth` → `CheckTokenVersion`), so a mismatch is an
+  instant 401 on the very next request after the bump, regardless of the
+  token's own expiry.
+- `UPDATE app.refresh_tokens SET revoked = true WHERE revoked = false` —
+  required *in addition to* the bump above. `AuthService.Refresh` does not
+  compare the refresh token's embedded `ver` claim against the user's
+  current `token_version`; it only checks the `refresh_tokens` row
+  (jti + hash + not revoked + not expired) and then mints a fresh pair
+  using the user's *current* token_version. Without this second statement,
+  a client silently retrying `/refresh` after a 401 would get handed new,
+  valid tokens and the reset would have no visible effect.
+
+Both statements run in one transaction. The job is a plain in-process timer
+(`time.Until` next UTC midnight, `time.NewTimer`, loop) — no new dependency
+(e.g. a cron-expression library) since this is a single fixed daily time,
+and no pg_cron dependency either, so it doesn't need that Supabase
+extension enabled. Safe to run on more than one server instance
+simultaneously: both UPDATEs are effectively idempotent (a redundant
+token_version bump or an already-revoked refresh_tokens row is harmless),
+so no distributed lock was added.

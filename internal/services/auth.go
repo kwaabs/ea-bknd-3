@@ -435,6 +435,39 @@ func (s *AuthService) CheckTokenVersion(ctx context.Context, userID string, toke
 	return user.TokenVersion == tokenVersion, nil
 }
 
+// ResetAllSessions force-logs-out every user: every currently-issued access
+// token fails its next CheckTokenVersion check (bumped token_version no
+// longer matches the token's embedded "ver" claim), and every outstanding
+// refresh token is revoked so a client can't silently obtain a fresh pair
+// via /refresh — Refresh() re-reads the user's live token_version rather
+// than comparing against the token it was handed, so revoking token_version
+// alone would not force re-authentication without this.
+func (s *AuthService) ResetAllSessions(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.NewUpdate().
+		TableExpr("app.users").
+		Set("token_version = token_version + 1").
+		Where("1 = 1").
+		Exec(ctx); err != nil {
+		return fmt.Errorf("bump token_version: %w", err)
+	}
+
+	if _, err := tx.NewUpdate().
+		TableExpr("app.refresh_tokens").
+		Set("revoked = true").
+		Where("revoked = false").
+		Exec(ctx); err != nil {
+		return fmt.Errorf("revoke refresh tokens: %w", err)
+	}
+
+	return tx.Commit()
+}
+
 // LoginAzureAD validates the Azure AD id_token and provisions/returns the user
 func (s *AuthService) LoginAzureAD(ctx context.Context, idToken string, accessToken string, deviceInfo string) (*auth.TokenPair, *UserInfo, error) {
 	// Validate the token by calling Microsoft's userinfo endpoint

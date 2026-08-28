@@ -60,6 +60,33 @@ func billingPeriodDateBounds(from, to time.Time) (start, endExclusive time.Time,
 	return start, endExclusive, true
 }
 
+// normalizeZeusRegionNames appends " Region" to each region name that
+// doesn't already end with it. zeus_sales.regionname always stores the
+// administrative-unit-qualified form ("Tema Region", "Accra East Region"),
+// but every other source of a region value in this system (the meter
+// table, the region-name query param callers actually send, the frontend's
+// region-select options) uses the short form ("Tema", "Accra East") — so an
+// unqualified filter value would silently match zero rows. Confirmed
+// against live data: region=Tema returns nothing; region=Tema+Region
+// returns real rows. Case-insensitive check so an already-correct or
+// differently-cased "region" suffix isn't doubled up; the appended suffix
+// itself doesn't need to match the stored casing since every filter that
+// reads RegionName compares via lower(regionname) anyway.
+func normalizeZeusRegionNames(regions []string) []string {
+	if len(regions) == 0 {
+		return regions
+	}
+	out := make([]string, len(regions))
+	for i, r := range regions {
+		trimmed := strings.TrimSpace(r)
+		if trimmed != "" && !strings.HasSuffix(strings.ToLower(trimmed), " region") {
+			trimmed += " Region"
+		}
+		out[i] = trimmed
+	}
+	return out
+}
+
 // base returns a select on the raw zeus_sales table with all filters
 // applied. Detail always uses this; Aggregate uses it only as the
 // row-level fallback (search / account / service point / meter code /

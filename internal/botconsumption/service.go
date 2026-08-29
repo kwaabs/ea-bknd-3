@@ -90,16 +90,26 @@ func (s *Service) base(p FilterParams) *bun.SelectQuery {
 // has and it's a free-text "monthname-year" label, not a real date column
 // — matching it against a date range means parsing every distinct label
 // and comparing at month granularity, not building a SQL date-range WHERE.
-// No-op (returns p unchanged) if BillMonth was already given explicitly —
-// that takes precedence — or if both DateFrom and DateTo are zero.
+// No-op (returns p unchanged, noMatch=false) if BillMonth was already given
+// explicitly — that takes precedence — or if both DateFrom and DateTo are
+// zero.
 //
 // Fetches the table's distinct billmonth values (expected to stay a small
 // set — one label per calendar month the source has ever sent) and matches
 // each in Go via parseBillMonth rather than parsing month names in SQL, so
 // one malformed label can't fail the whole query.
-func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterParams) (FilterParams, error) {
+//
+// noMatch=true means a date range WAS given but zero billmonth labels
+// overlap it — the caller must treat this as "return nothing" and skip
+// querying base() entirely, NOT fall through with p.BillMonth left empty.
+// dbx.InLower treats an empty slice as "no filter requested" (correct for
+// the normal case), so setting p.BillMonth to []string{} here would make
+// the date filter silently vanish and match every row instead of none —
+// exactly the "a Jan-Apr 2026 filter returned everything" bug this
+// exists to prevent.
+func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterParams) (params FilterParams, noMatch bool, err error) {
 	if len(p.BillMonth) > 0 || (p.DateFrom.IsZero() && p.DateTo.IsZero()) {
-		return p, nil
+		return p, false, nil
 	}
 
 	var raw []string
@@ -107,7 +117,7 @@ func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterPara
 		TableExpr(table).
 		ColumnExpr("DISTINCT billmonth").
 		Scan(ctx, &raw); err != nil {
-		return p, err
+		return p, false, err
 	}
 
 	matched := make([]string, 0, len(raw))
@@ -126,16 +136,25 @@ func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterPara
 		matched = append(matched, r)
 	}
 
+	if len(matched) == 0 {
+		return p, true, nil
+	}
+
 	p.BillMonth = matched
-	return p, nil
+	return p, false, nil
 }
 
 // Detail returns a page of matching rows. The select and its count run
 // concurrently inside dbx.Paginate.
 func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Pagination) (*dbx.Page[Reading], error) {
-	p, err := s.resolveDateRangeToBillMonths(ctx, p)
+	p, noMatch, err := s.resolveDateRangeToBillMonths(ctx, p)
 	if err != nil {
 		return nil, err
+	}
+	if noMatch {
+		return &dbx.Page[Reading]{
+			Data: []Reading{}, Total: 0, Page: pg.Page, Limit: pg.Limit, TotalPages: pg.TotalPages(0),
+		}, nil
 	}
 	q := s.base(p).
 		ColumnExpr("customer_name, meternumber, geo_code, kwh, tarrif, billmonth, district").
@@ -169,9 +188,12 @@ func groupExpr(g string) (selectExpr, groupByExpr string, ok bool) {
 // hashes fine alongside the other aggregates without the composite-key cost
 // noted on zeusbilling's equivalent.
 func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []string) (*AggregateResult, error) {
-	p, err := s.resolveDateRangeToBillMonths(ctx, p)
+	p, noMatch, err := s.resolveDateRangeToBillMonths(ctx, p)
 	if err != nil {
 		return nil, err
+	}
+	if noMatch {
+		return &AggregateResult{Data: []AggregateRow{}, Total: 0}, nil
 	}
 	q := s.base(p).
 		ColumnExpr("COUNT(DISTINCT meternumber) AS customer_count").

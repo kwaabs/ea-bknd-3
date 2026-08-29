@@ -5,6 +5,7 @@ import (
 	"bknd-3/internal/announcements"
 	"bknd-3/internal/auth"
 	"bknd-3/internal/botconsumption"
+	"bknd-3/internal/bxcconsumption"
 	"bknd-3/internal/cache"
 	"bknd-3/internal/comments"
 	"bknd-3/internal/config"
@@ -190,6 +191,10 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 				// Bot-ingested consumption source (app.bot_consumption) —
 				// independent of Zeus/MMS/AMR, no shared keys with either.
 				r.Mount("/bot-consumption", botconsumption.Routes(db, logr.Logger))
+				// Another bot-ingested legacy consumption source
+				// (app.bxc_consumption), structurally identical to
+				// bot-consumption above but its own independent table.
+				r.Mount("/bxc-consumption", bxcconsumption.Routes(db, logr.Logger))
 			})
 
 			// ✅ NEW: Spatial service area routes

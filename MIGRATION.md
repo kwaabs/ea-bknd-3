@@ -326,3 +326,29 @@ added — both are the kind of thing this session only added in response to a
 confirmed slow query on the other sources, not proactively at
 table-introduction time. Revisit once real data volume and query patterns
 are known.
+
+## New source: bxc_consumption (added)
+
+`internal/bxcconsumption` is a second bot-ingested legacy source, mounted
+at `/meters/consumption/bxc-consumption`, structurally identical to
+`botconsumption` above (same 8 columns, same `resolveDateRangeToBillMonths`
+month-precision date handling, same `noMatch` fix included from the
+start). One real difference: `region` here is plain `varchar(10)`, not
+`bpchar(15)`, so no `trim()` is needed anywhere it's filtered, grouped, or
+returned.
+
+**Flagging a real risk in both `bot_consumption.billmonth` and
+`bxc_consumption.billmonth`**, not something introduced or fixed here:
+both are declared `bpchar(9)`, which only fits `"<month>-YYYY"` for
+May/June/July (8-9 characters). Every other month name overflows it and
+gets silently truncated by Postgres — e.g. `"september-2026"` (14 chars)
+becomes `"september"` with the hyphen and year cut off entirely, which
+`parseBillMonth` then correctly (but silently) fails to parse as a date,
+excluding it from any `dateFrom`/`dateTo`-filtered query. It would still
+appear in `Detail`/`Aggregate` results when no date filter is applied, and
+in a raw `billMonth` value list, just not resolvable by date. Both sample
+payloads seen so far only used May/June/July, so this hasn't surfaced yet
+— it's a ticking time bomb the moment another month's data lands, and the
+only real fix is widening the source column (or changing it to a proper
+date/varchar-without-length-limit type), which is outside this repo's
+control since these are externally-ingested tables.

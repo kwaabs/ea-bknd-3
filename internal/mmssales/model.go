@@ -34,6 +34,12 @@ type Sale struct {
 	STSLastMonthKwhRead       *float64   `bun:"sts_last_month_kwh_read" json:"sts_last_month_kwh_read"`
 	DateTime                  *time.Time `bun:"date_time" json:"date_time"`
 	DataSrc                   string     `bun:"data_src" json:"data_src"`
+	// IsDuplicateReading (sql/mms_customer_sales_dedup.sql) is scanned so
+	// Detail's SELECT * doesn't fail on this column, but base() already
+	// filters WHERE NOT is_duplicate_reading unconditionally — every row
+	// reaching here is always false, so it's excluded from JSON to keep
+	// API responses byte-compatible with the pre-dedup shape.
+	IsDuplicateReading bool `bun:"is_duplicate_reading" json:"-"`
 }
 
 // FilterParams holds row-level filters shared by detail and aggregate.

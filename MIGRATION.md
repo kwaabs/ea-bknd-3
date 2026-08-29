@@ -311,6 +311,16 @@ Two things worth knowing about this table specifically:
   the request. An explicit `billMonth` param always takes precedence over
   `dateFrom`/`dateTo` if both are given.
 
+  **Bug fixed after initial deploy**: a date range that overlapped zero
+  billmonth labels (e.g. filtering Jan-Apr 2026 when the table only has
+  June 2026 data) returned *every* row instead of none. Cause:
+  `resolveDateRangeToBillMonths` set `p.BillMonth` to an empty slice when
+  nothing matched, but `dbx.InLower` treats an empty slice as "no filter
+  requested" (correct for the normal, no-filter case) — so the date filter
+  silently vanished. Fixed by having the resolver return a `noMatch bool`
+  alongside `FilterParams`; `Detail`/`Aggregate` check it and return an
+  empty result directly, without querying `base()` at all when it's true.
+
 No summary/fast-path table yet (this source starts small) and no indexes
 added — both are the kind of thing this session only added in response to a
 confirmed slow query on the other sources, not proactively at

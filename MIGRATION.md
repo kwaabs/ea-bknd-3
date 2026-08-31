@@ -414,3 +414,39 @@ endpoint yet. `overview-main-tab-v3.tsx`, `region-detail-marquee.tsx`,
 `energy-flow-diagram.tsx`, and `choropleth-map.tsx` still compute their
 own stale per-source totals and need to be migrated to call this endpoint
 instead — that's the next piece of work, not part of this commit.
+
+## New source: pns_consumption (added)
+
+`internal/pnsconsumption` is a third legacy consumption source, mounted at
+`/meters/consumption/pns-consumption`, independent of Zeus/MMS/AMR/BOT/BXC
+(no shared keys with any of them). The main consumption figure is the
+`energy` column specifically — **not** `totalenergy`, which folds in
+service/demand charges on top of energy and isn't a consumption number.
+
+Two things set this source apart from bot_consumption/bxc_consumption:
+
+- **A real `billdate` timestamp column.** Unlike bot/bxc (free-text
+  `billmonth` label only, requiring `resolveDateRangeToBillMonths` to parse
+  and month-match it against a date range), pns_consumption has an actual
+  timestamp — `dateFrom`/`dateTo` filter directly against it via
+  `dbx.DateRange`, a plain SQL range, no label-parsing machinery needed.
+  `billmonth` (`bpchar(6)`, `"YYYYMM"` e.g. `"201809"`) is still stored and
+  returned/filterable by exact value, just not used for date-range
+  matching.
+- **No region/district name anywhere.** `regionid`/`districtid` are opaque
+  codes (e.g. `"10001001"`, `"10011060"`) — confirmed via a full-repo
+  search that no lookup table or mapping from these codes to human-readable
+  region/district names exists anywhere in this codebase today (every
+  other source stores a name directly). `Reading`/`AggregateRow` expose the
+  raw codes as-is for now; the DBA is expected to provide a proper mapping
+  later. When that lands, resolving it only needs a JOIN added to
+  `base()` plus new Name fields — not a reshape of this package. Until
+  then, any frontend surface built on this source will show codes, not
+  region/district names.
+
+`region`/`district`/`tariff` are accepted as query-param/groupBy aliases
+for `regionid`/`districtid`/`tariffcategory` (mapped in `groupExpr` and
+`parseFilters`) so callers use the same param names as every other source,
+even though the values themselves are codes here. No summary/fast-path
+table or indexes yet — same "add only once a real slow query shows up"
+approach as bot/bxc_consumption.

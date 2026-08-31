@@ -18,6 +18,7 @@ import (
 	authmw "bknd-3/internal/middleware"
 	"bknd-3/internal/mmssales"
 	"bknd-3/internal/notifyemail"
+	"bknd-3/internal/salessummary"
 	"bknd-3/internal/serviceareas"
 	"bknd-3/internal/services"
 	"bknd-3/internal/zeusbilling"
@@ -195,6 +196,12 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 				// (app.bxc_consumption), structurally identical to
 				// bot-consumption above but its own independent table.
 				r.Mount("/bxc-consumption", bxcconsumption.Routes(db, logr.Logger))
+				// Canonical cross-source Prepaid/Postpaid totals — merges
+				// Zeus/MMS/BOT/BXC (and whatever's added next) server-side
+				// so every frontend consumer reads one number instead of
+				// each re-deriving its own "Zeus + MMS" copy by hand. See
+				// internal/salessummary's package doc for why this exists.
+				r.Mount("/customer-sales-summary", salessummary.Routes(db, logr.Logger))
 			})
 
 			// ✅ NEW: Spatial service area routes

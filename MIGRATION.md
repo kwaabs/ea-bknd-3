@@ -352,3 +352,65 @@ payloads seen so far only used May/June/July, so this hasn't surfaced yet
 only real fix is widening the source column (or changing it to a proper
 date/varchar-without-length-limit type), which is outside this repo's
 control since these are externally-ingested tables.
+
+## New package: internal/salessummary — cross-source totals (added)
+
+Root cause being fixed: "what is the total Prepaid (or Postpaid) figure
+across every source" was computed independently, by hand, in five-plus
+separate frontend files (dashboard's Sales card, customer-sales-overview,
+region-detail-marquee, energy-flow-diagram, choropleth-map), each
+re-deriving its own copy of "Zeus (deduped) + MMS". When BOT and then BXC
+were added as new sources, they were folded into `customer-sales-overview`
+correctly but the same fix was initially missed in the other four files —
+a mistake, not a one-off, because the totals logic had no single home.
+
+`internal/salessummary` (mounted at
+`/meters/consumption/customer-sales-summary`) is that single home. It
+calls each source's own `Service.Aggregate` directly — in-process Go
+function calls in the same binary, not HTTP calls to their own endpoints
+— and merges the results server-side into one cross-source total, grouped
+by region or district. `GET ?category=prepaid|postpaid&dateFrom=...&
+dateTo=...&groupBy=region|district&region=...&district=...`.
+
+Two things are centralized here that used to be re-implemented per file:
+
+- **Which sources belong to which category, and the one real dedup rule.**
+  `sourcesFor(category)` in service.go is now the only place a new source
+  gets registered. Confirmed business rule: MMS takes precedence over Zeus
+  Prepaid on any meter it already has (the pre-existing
+  `excludeMmsPrepaidDuplicates` rule, the one *real* overlap in this
+  system) — every other pairing (BOT vs Zeus/MMS, BXC vs Zeus/MMS, BOT vs
+  BXC, and any future legacy source against any other) is confirmed
+  genuinely unique with no overlap, so those sum in directly with no
+  precedence logic at all. Postpaid keeps Zeus Postpaid and Zeus AMR as
+  two separate `BySource` entries rather than merging them, since existing
+  callers show them as separate KPI badges — a caller that wants one
+  combined Postpaid number just sums both entries itself.
+- **Region/district name normalization across sources.** Zeus stores
+  suffixed names ("Tema Region", "Cape Coast District"); MMS/BOT/BXC store
+  the short form ("Tema", "Cape Coast"), and casing isn't guaranteed
+  consistent either. `normalizeGroupKey` (a Go port of the frontend's
+  `normalizeRegionName`/`shortRegionLabel` in
+  `use-resolved-region-name.ts`) strips a trailing "Region"/"District" and
+  lowercases before using the result as the merge key, so the same real
+  region reported four different ways by four sources lands in one `Row`.
+  The row's own displayed `GroupValue` keeps the short, unsuffixed form.
+
+Sources are fetched concurrently (one goroutine per source, results merged
+off a channel) since they're independent queries against different
+tables/services.
+
+Verified via a standalone script exercising `normalizeGroupKey`/the merge
+logic against a hand-built scenario (4 sources reporting "Accra East"
+under 4 different spellings/casings correctly collapsing into one row with
+correct summed kwh/customers and correct per-source breakdown; a
+single-source region staying separate; edge cases like a bare "Region"
+input, leading/trailing whitespace, and empty input) — no live DB access
+from this sandbox, same constraint as every other verification this
+session.
+
+**Not yet done**: no frontend consumer has been migrated to call this
+endpoint yet. `overview-main-tab-v3.tsx`, `region-detail-marquee.tsx`,
+`energy-flow-diagram.tsx`, and `choropleth-map.tsx` still compute their
+own stale per-source totals and need to be migrated to call this endpoint
+instead — that's the next piece of work, not part of this commit.

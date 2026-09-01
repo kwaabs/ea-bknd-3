@@ -448,5 +448,46 @@ Two things set this source apart from bot_consumption/bxc_consumption:
 for `regionid`/`districtid`/`tariffcategory` (mapped in `groupExpr` and
 `parseFilters`) so callers use the same param names as every other source,
 even though the values themselves are codes here. No summary/fast-path
-table or indexes yet — same "add only once a real slow query shows up"
-approach as bot/bxc_consumption.
+table yet — same "add only once a real slow query shows up" approach as
+bot/bxc_consumption.
+
+**Indexes added** (`sql/indexes_pns_consumption.sql`, not yet run against
+the database — apply manually) once the real row count came back at 7M+:
+functional `lower(...)` indexes on `regionid`/`districtid`/
+`tariffcategory`/`billmonth` (every filter on these goes through
+`dbx.InLower`, which a plain index can't serve), a plain index on
+`serviceid` (exact match via `dbx.In`), an index on `billdate` (the real
+date-range filter), `pg_trgm` GIN indexes on `customerid`/`serviceid`/
+`servicepoint` for the `%search%` LIKE, and a composite
+`(regionid, districtid, customerid)` index matching `/detail`'s default
+sort. Same shape as `sql/indexes_mms_customer_sales.sql`; unlike bot/bxc
+(which start small), pns_consumption needed this from the start given its
+size.
+
+## Resumable app.migrate_zeus_sales_from_working (added)
+
+`sql/migrate_zeus_sales_from_working_resumable.sql` — not tied to any Go
+application code, this is a pure operational DB script (run manually
+against the database, same as every other `sql/*.sql` file here).
+
+The existing `app.migrate_zeus_sales_from_working` stored procedure
+batch-migrates `app.zeus_sales_working` (18.8M+ rows) into `app.zeus_sales`
+in committed chunks, but tracked its cursor as a local `plpgsql` variable
+only — so every fresh `CALL` (including one resuming after an interruption)
+restarted from row 0 and re-scanned the entire source table. Re-running was
+always safe (`INSERT ... ON CONFLICT DO UPDATE`, never `DELETE` — no risk
+of data loss or duplication), just wasteful.
+
+This file adds `app.migration_checkpoints` (one row per procedure,
+`last_id` + `updated_at`) and replaces the procedure with a version that
+reads the checkpoint at the start and writes it back atomically with each
+batch — in the same transaction, right before that batch's `COMMIT` — so a
+plain `CALL app.migrate_zeus_sales_from_working();` with no arguments now
+resumes exactly where the last run stopped. A new `p_reset boolean`
+parameter (default `false`) forces a full re-run from the beginning when
+that's actually wanted.
+
+The cursor stays `id`-based (an arbitrary surrogate key on
+`zeus_sales_working`, not a date) — jumping to a specific date manually is
+possible by writing the corresponding `MAX(id)` into the checkpoint row
+directly, but that's a deliberate skip-ahead, not the normal resume path.

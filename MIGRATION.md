@@ -463,3 +463,31 @@ date-range filter), `pg_trgm` GIN indexes on `customerid`/`serviceid`/
 sort. Same shape as `sql/indexes_mms_customer_sales.sql`; unlike bot/bxc
 (which start small), pns_consumption needed this from the start given its
 size.
+
+## Resumable app.migrate_zeus_sales_from_working (added)
+
+`sql/migrate_zeus_sales_from_working_resumable.sql` — not tied to any Go
+application code, this is a pure operational DB script (run manually
+against the database, same as every other `sql/*.sql` file here).
+
+The existing `app.migrate_zeus_sales_from_working` stored procedure
+batch-migrates `app.zeus_sales_working` (18.8M+ rows) into `app.zeus_sales`
+in committed chunks, but tracked its cursor as a local `plpgsql` variable
+only — so every fresh `CALL` (including one resuming after an interruption)
+restarted from row 0 and re-scanned the entire source table. Re-running was
+always safe (`INSERT ... ON CONFLICT DO UPDATE`, never `DELETE` — no risk
+of data loss or duplication), just wasteful.
+
+This file adds `app.migration_checkpoints` (one row per procedure,
+`last_id` + `updated_at`) and replaces the procedure with a version that
+reads the checkpoint at the start and writes it back atomically with each
+batch — in the same transaction, right before that batch's `COMMIT` — so a
+plain `CALL app.migrate_zeus_sales_from_working();` with no arguments now
+resumes exactly where the last run stopped. A new `p_reset boolean`
+parameter (default `false`) forces a full re-run from the beginning when
+that's actually wanted.
+
+The cursor stays `id`-based (an arbitrary surrogate key on
+`zeus_sales_working`, not a date) — jumping to a specific date manually is
+possible by writing the corresponding `MAX(id)` into the checkpoint row
+directly, but that's a deliberate skip-ahead, not the normal resume path.

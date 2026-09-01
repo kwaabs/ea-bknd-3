@@ -448,5 +448,18 @@ Two things set this source apart from bot_consumption/bxc_consumption:
 for `regionid`/`districtid`/`tariffcategory` (mapped in `groupExpr` and
 `parseFilters`) so callers use the same param names as every other source,
 even though the values themselves are codes here. No summary/fast-path
-table or indexes yet — same "add only once a real slow query shows up"
-approach as bot/bxc_consumption.
+table yet — same "add only once a real slow query shows up" approach as
+bot/bxc_consumption.
+
+**Indexes added** (`sql/indexes_pns_consumption.sql`, not yet run against
+the database — apply manually) once the real row count came back at 7M+:
+functional `lower(...)` indexes on `regionid`/`districtid`/
+`tariffcategory`/`billmonth` (every filter on these goes through
+`dbx.InLower`, which a plain index can't serve), a plain index on
+`serviceid` (exact match via `dbx.In`), an index on `billdate` (the real
+date-range filter), `pg_trgm` GIN indexes on `customerid`/`serviceid`/
+`servicepoint` for the `%search%` LIKE, and a composite
+`(regionid, districtid, customerid)` index matching `/detail`'s default
+sort. Same shape as `sql/indexes_mms_customer_sales.sql`; unlike bot/bxc
+(which start small), pns_consumption needed this from the start given its
+size.

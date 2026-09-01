@@ -18,6 +18,7 @@ import (
 	authmw "bknd-3/internal/middleware"
 	"bknd-3/internal/mmssales"
 	"bknd-3/internal/notifyemail"
+	"bknd-3/internal/pnsconsumption"
 	"bknd-3/internal/salessummary"
 	"bknd-3/internal/serviceareas"
 	"bknd-3/internal/services"
@@ -196,6 +197,12 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 				// (app.bxc_consumption), structurally identical to
 				// bot-consumption above but its own independent table.
 				r.Mount("/bxc-consumption", bxcconsumption.Routes(db, logr.Logger))
+				// PNS-ingested legacy consumption source
+				// (app.pns_consumption) — independent of Zeus/MMS/AMR/BOT/
+				// BXC. Unlike those, region/district here are only
+				// available as opaque regionid/districtid codes (no name
+				// lookup exists yet) — see the package doc comment.
+				r.Mount("/pns-consumption", pnsconsumption.Routes(db, logr.Logger))
 				// Canonical cross-source Prepaid/Postpaid totals — merges
 				// Zeus/MMS/BOT/BXC (and whatever's added next) server-side
 				// so every frontend consumer reads one number instead of

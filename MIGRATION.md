@@ -491,3 +491,17 @@ The cursor stays `id`-based (an arbitrary surrogate key on
 `zeus_sales_working`, not a date) — jumping to a specific date manually is
 possible by writing the corresponding `MAX(id)` into the checkpoint row
 directly, but that's a deliberate skip-ahead, not the normal resume path.
+
+**Bug fixed after first real run**: `ERROR: ON CONFLICT DO UPDATE command
+cannot affect row a second time`. Cause: `zeus_sales_working` can have more
+than one row for the same `(_id, billing month)` — a bill re-staged after
+a status/amount change lands as a new row with a new working-table `id`,
+same `_id`. A single `INSERT ... ON CONFLICT DO UPDATE` command can only
+touch a given target row once; two source rows resolving to the same
+conflict key within one batch's `SELECT` broke that. Fixed by wrapping the
+batch's source query in `SELECT DISTINCT ON (_id, billingperiod_date) ...
+ORDER BY _id, billingperiod_date, id DESC`, keeping only the
+highest-working-table-id (most recently staged) row per key before it
+reaches `INSERT`. This only dedupes within one batch — a row a *previous*
+batch already inserted is still correctly updated by a later batch's own
+`ON CONFLICT`, since that's a separate statement/transaction.

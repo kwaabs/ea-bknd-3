@@ -315,19 +315,33 @@ BEGIN
             updatedat,
             __v,
             accounttype,
+            billingperiod_date
 
+        FROM (
             /*
-             * First day of the billing month.
+             * DISTINCT ON (_id, billingperiod_date), keeping the row with
+             * the highest working-table id per key (i.e. the most
+             * recently staged version). Needed because a single INSERT
+             * ... ON CONFLICT DO UPDATE command cannot touch the same
+             * target row twice — if zeus_sales_working has more than one
+             * row for the same (_id, billing month) within this batch's
+             * id range (e.g. a bill re-staged after a status/amount
+             * change), the upsert below would otherwise fail with
+             * "ON CONFLICT DO UPDATE command cannot affect row a second
+             * time". Rows outside this batch's id range that share a key
+             * with a row in this batch are unaffected — this only dedupes
+             * WITHIN one batch, not across the whole table; the next
+             * batch's ON CONFLICT still correctly updates a row a
+             * previous batch already inserted.
              */
-            make_date(
-                billingyear::integer,
-                billingmonth::integer,
-                1
-            )
-
-        FROM app.zeus_sales_working
-        WHERE id > v_last_id
-          AND id <= v_batch_max_id
+            SELECT DISTINCT ON (w._id, make_date(w.billingyear::integer, w.billingmonth::integer, 1))
+                w.*,
+                make_date(w.billingyear::integer, w.billingmonth::integer, 1) AS billingperiod_date
+            FROM app.zeus_sales_working w
+            WHERE w.id > v_last_id
+              AND w.id <= v_batch_max_id
+            ORDER BY w._id, make_date(w.billingyear::integer, w.billingmonth::integer, 1), w.id DESC
+        ) dedup
 
         ON CONFLICT (_id, billingperiod_date)
         DO UPDATE SET

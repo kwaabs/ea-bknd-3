@@ -32,8 +32,8 @@ func (p FilterParams) hasRowLevelFilters() bool {
 // dimensionFilters applies the filters that exist on BOTH the raw table and
 // the summary table (same column names by design).
 func dimensionFilters(q *bun.SelectQuery, p FilterParams) *bun.SelectQuery {
-	q = dbx.InLower(q, "region", p.Region)
-	q = dbx.InLower(q, "district", p.District)
+	q = dbx.InLowerOrBlank(q, "region", p.Region)
+	q = dbx.InLowerOrBlank(q, "district", p.District)
 	q = dbx.InLower(q, "contract_type", p.ContractType)
 	q = dbx.InLower(q, "tariff", p.Tariff)
 	q = dbx.InLower(q, "manufacturer", p.Manufacturer)

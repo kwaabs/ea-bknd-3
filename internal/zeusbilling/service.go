@@ -96,8 +96,8 @@ func normalizeZeusRegionNames(regions []string) []string {
 // path for zeus_sales").
 func (s *Service) base(p FilterParams) *bun.SelectQuery {
 	q := s.db.NewSelect().TableExpr(table)
-	q = dbx.InLower(q, "regionname", p.RegionName)
-	q = dbx.InLower(q, "districtname", p.DistrictName)
+	q = dbx.InLowerOrBlank(q, "regionname", p.RegionName)
+	q = dbx.InLowerOrBlank(q, "districtname", p.DistrictName)
 	q = dbx.InLower(q, "tariffclasscode", p.TariffClassCode)
 	q = dbx.InLower(q, "serviceclass", p.ServiceClass)
 	q = dbx.InLower(q, "accounttype", p.AccountType)
@@ -160,8 +160,8 @@ func (p FilterParams) hasRowLevelFilters() bool {
 // raw table, the period summary, AND the customer roster alike (same
 // column names by design).
 func dimensionFilters(q *bun.SelectQuery, p FilterParams) *bun.SelectQuery {
-	q = dbx.InLower(q, "regionname", p.RegionName)
-	q = dbx.InLower(q, "districtname", p.DistrictName)
+	q = dbx.InLowerOrBlank(q, "regionname", p.RegionName)
+	q = dbx.InLowerOrBlank(q, "districtname", p.DistrictName)
 	q = dbx.InLower(q, "tariffclasscode", p.TariffClassCode)
 	q = dbx.InLower(q, "serviceclass", p.ServiceClass)
 	q = dbx.InLower(q, "accounttype", p.AccountType)

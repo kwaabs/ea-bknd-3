@@ -560,3 +560,23 @@ double-quoting to match the exact casing in the sample data
 (`"METER_SERIAL_NUMBER"` etc.) — if the real columns turn out to be plain
 lowercase, drop the quotes; `latitude`/`longitude` are cast to `::float8`
 defensively in case the source column is text rather than numeric.
+
+## Fix: clicking the "Unknown" region/district row filtered nothing (added)
+
+Region/district breakdown tables (zeus billing, mms sales) group rows with
+a NULL/blank region or district into one bucket and label it "Unknown" for
+display — no row ever actually stores that literal string. Clicking that
+row to drill in (or filter another table by it) sent `region=Unknown` (or
+`district=Unknown`) straight through to `dbx.InLower`, which did a literal
+`lower(regionname) IN ('unknown')` match — zero rows, since the real value
+is NULL/blank, not the string "Unknown". The click silently did nothing.
+
+Fixed with `dbx.InLowerOrBlank` (`internal/dbx/filters.go`): identical to
+`InLower`, except a single filter value that case-insensitively equals
+"unknown" means "column is NULL or empty/whitespace-only" instead of a
+literal match. Wired into `zeusbilling` (`regionname`/`districtname`, both
+`base()` and `dimensionFilters()` — so it works on the fast summary-table
+aggregate path too, not just the raw-row fallback) and `mmssales`
+(`region`/`district`, in `dimensionFilters()`, shared by both `base()` and
+`summaryBase()`). No API/query-param shape change — `region=Unknown` now
+just means something real.

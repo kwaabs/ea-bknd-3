@@ -580,3 +580,28 @@ aggregate path too, not just the raw-row fallback) and `mmssales`
 (`region`/`district`, in `dimensionFilters()`, shared by both `base()` and
 `summaryBase()`). No API/query-param shape change — `region=Unknown` now
 just means something real.
+
+## Fix: populate_mms_customer_sales unique constraint violation (added)
+
+Live error running `app.populate_mms_customer_sales()` against a table
+that already had data: `ERROR: duplicate key value violates unique
+constraint "uq_meter_time"`. `app.mms_customer_sales` has a unique
+constraint on `(meter_number, date_time)` that
+`sql/populate_mms_customer_sales_from_raw.sql`'s original comments missed
+— the "no declared primary key/id column" note in
+`mms_customer_sales_dedup.sql` is about a PK/id specifically, a different
+thing from this separate unique constraint.
+
+Fixed with `ON CONFLICT (meter_number, date_time) DO NOTHING` on the
+population procedure's INSERT. Deliberately `DO NOTHING`, not `DO UPDATE`:
+this table's existing data is exactly what a defensive "reprocess the
+checkpoint's boundary day" re-run (recommended when pointing this
+procedure at a table that already has prior data) is expected to hit —
+those rows should be silently skipped, not erupt into a batch-ending
+error. `DO NOTHING` also has no "cannot affect the same row twice in one
+command" restriction the way `DO UPDATE` does (see
+`migrate_zeus_sales_from_working_resumable.sql`'s dedup fix), so no extra
+per-batch dedup step is needed here even if `MMS_SALES` ever has two rows
+sharing a `(METER_SERIAL_NUMBER, DATE_TIME)` pair. A LEFT JOIN orphan (no
+matching meter record, `meter_number` NULL) still always inserts cleanly
+— NULL never conflicts with anything under a standard unique constraint.

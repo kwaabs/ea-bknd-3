@@ -109,13 +109,26 @@ BEGIN
      *     app.migration_checkpoints so separate CALLs resume instead of
      *     restarting, exactly like migrate_zeus_sales_from_working.
      *
-     * Neither source table is modified. This is a straight append into
-     * app.mms_customer_sales — that table has no unique constraint to
-     * upsert against (confirmed in mms_customer_sales_dedup.sql), so
-     * there is no ON CONFLICT here. Re-running this procedure without
-     * resetting the checkpoint will not re-insert rows already
-     * processed; it only picks up rows added to MMS_SALES since the
-     * last run.
+     * Neither source table is modified. app.mms_customer_sales has a
+     * unique constraint uq_meter_time on (meter_number, date_time) —
+     * confirmed live (mms_customer_sales_dedup.sql's "no declared primary
+     * key/id column" comment is about a PK/id specifically, not this
+     * separate unique constraint, which was missed when this procedure
+     * was first written). INSERT ... ON CONFLICT (meter_number,
+     * date_time) DO NOTHING — skip a row already present rather than
+     * erroring, which matters both for a plain re-run (nothing to do for
+     * already-loaded rows) and for the deliberate "reprocess the
+     * checkpoint's boundary day" seeding approach recommended when
+     * pointing this at a table that already has data: those rows expect
+     * to hit real conflicts. DO NOTHING (not DO UPDATE) is also what
+     * keeps this safe against duplicate (meter_serial_number, DATE_TIME)
+     * pairs landing in the same batch's own source SELECT — unlike DO
+     * UPDATE, DO NOTHING has no "cannot affect the same row twice in one
+     * command" restriction, so no extra dedup step is needed here the
+     * way migrate_zeus_sales_from_working_resumable.sql needed one for
+     * its DO UPDATE. A LEFT JOIN orphan (no matching meter record) always
+     * inserts cleanly regardless — its meter_number is NULL, and NULL
+     * never conflicts with anything under a standard unique constraint.
      *
      * After the loop, resync_mms_duplicate_flags and
      * resync_mms_sales_summary (sql/mms_customer_sales_dedup.sql) are
@@ -257,7 +270,8 @@ BEGIN
         LEFT JOIN app.mms_customer_meter m
             ON lower(trim(m.meter_number)) = lower(trim(s."METER_SERIAL_NUMBER"))
         WHERE (s."DATE_TIME"::timestamptz, s."METER_SERIAL_NUMBER") > (v_last_dt, v_last_meter)
-          AND (s."DATE_TIME"::timestamptz, s."METER_SERIAL_NUMBER") <= (v_batch_max_dt, v_batch_max_meter);
+          AND (s."DATE_TIME"::timestamptz, s."METER_SERIAL_NUMBER") <= (v_batch_max_dt, v_batch_max_meter)
+        ON CONFLICT (meter_number, date_time) DO NOTHING;
 
         /*
          * Advance the cursor.

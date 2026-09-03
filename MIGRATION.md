@@ -505,3 +505,58 @@ highest-working-table-id (most recently staged) row per key before it
 reaches `INSERT`. This only dedupes within one batch — a row a *previous*
 batch already inserted is still correctly updated by a later batch's own
 `ON CONFLICT`, since that's a separate statement/transaction.
+
+## Populate app.mms_customer_sales from raw meter + sales tables (added)
+
+`sql/populate_mms_customer_sales_from_raw.sql` — pure operational DB
+script, not tied to Go application code, applied manually like every other
+`sql/*.sql` file here. Adds `app.populate_mms_customer_sales(p_batch_size,
+p_reset)`, joining two raw source tables into `app.mms_customer_sales`:
+
+- `app.mms_customer_meter` — one row per physical meter (dimension:
+  manufacturer, model, customer name, contract, tariff, region/district,
+  lat/long, etc).
+- `app."MMS_SALES"` — one row per meter **per periodic reading** (fact:
+  `METER_SERIAL_NUMBER`, the three `STS_*` reading values, `DATE_TIME`) —
+  far larger than the meter table and grows indefinitely.
+
+Joined on `mms_customer_meter.meter_number = MMS_SALES.METER_SERIAL_NUMBER`
+(case/whitespace-insensitive), **LEFT JOIN** — confirmed explicitly: a
+sales reading with no matching meter record still gets inserted, with all
+meter-dimension columns NULL, rather than being silently dropped.
+`app.mms_customer_sales` has no unique constraint to upsert against
+(confirmed in `mms_customer_sales_dedup.sql`), so this is a straight
+`INSERT`, not `ON CONFLICT`.
+
+**Batching had to differ from `migrate_zeus_sales_from_working`'s
+pattern.** That procedure batches by a strictly-increasing surrogate `id`
+column, safe with a plain row-count `LIMIT`. `MMS_SALES` has no such
+column, and being periodic snapshot data, plausibly has millions of rows
+sharing the exact same `DATE_TIME` (one reading per meter, per period, for
+the whole fleet at once) — a `LIMIT`-then-`advance-to-MAX(DATE_TIME)`
+approach would risk splitting one `DATE_TIME`'s rows across two batches
+and having the next batch's `DATE_TIME > checkpoint` filter skip the
+remainder. Fixed with **keyset pagination on the full
+`(DATE_TIME, METER_SERIAL_NUMBER)` tuple** instead of a single column —
+comparing the whole tuple in the `WHERE` clause means ties on `DATE_TIME`
+are never skipped or duplicated regardless of where a batch boundary falls
+within them. `app.migration_checkpoints` (added for the Zeus procedure)
+gained two more columns, `last_timestamp`/`last_text`, to hold this
+cursor shape — Zeus's procedure keeps using `last_id` and ignores them;
+this one uses them and ignores `last_id`. Resumable across `CALL`s the
+same way: a plain `CALL app.populate_mms_customer_sales();` continues from
+the checkpoint, `p_reset := true` forces a full re-run.
+
+After the loop (once per run, not per batch — far cheaper), it calls
+`app.resync_mms_duplicate_flags` and `app.resync_mms_sales_summary`
+(`sql/mms_customer_sales_dedup.sql`) for the whole run's touched date
+range, so newly inserted rows are deduped and reflected in the fast
+aggregate path automatically, without a separate manual step.
+
+**Assumptions baked in that need verifying against the real schema before
+running** (flagged in the file itself too): both raw tables live in the
+`app` schema; `MMS_SALES`'s table name and column names need
+double-quoting to match the exact casing in the sample data
+(`"METER_SERIAL_NUMBER"` etc.) — if the real columns turn out to be plain
+lowercase, drop the quotes; `latitude`/`longitude` are cast to `::float8`
+defensively in case the source column is text rather than numeric.

@@ -605,3 +605,45 @@ per-batch dedup step is needed here even if `MMS_SALES` ever has two rows
 sharing a `(METER_SERIAL_NUMBER, DATE_TIME)` pair. A LEFT JOIN orphan (no
 matching meter record, `meter_number` NULL) still always inserts cleanly
 — NULL never conflicts with anything under a standard unique constraint.
+
+## Fix: rows inserted by populate_mms_customer_sales left un-deduped (added)
+
+Live symptom: the same customer/meter/reading appearing twice in the
+Customer Records UI with two different `date_time`s a day or two apart —
+exactly the re-sync duplicate pattern `mms_customer_sales_dedup.sql`'s
+`is_duplicate_reading` flag exists to catch, but these rows were sitting
+with the column at its default `false`.
+
+Root cause: `resync_mms_duplicate_flags`/`resync_mms_sales_summary`
+originally ran ONCE, after the whole batch loop finished — not per batch,
+the ingestion contract `mms_customer_sales_dedup.sql` already documents.
+The `uq_meter_time` violation (previous fix above) crashed a run partway
+through; every batch before the crash had already committed its `INSERT`
+successfully, but the trailing once-at-the-end resync code was never
+reached, so all of that data stayed permanently un-deduped even after the
+crash was fixed and later runs continued past it.
+
+Fixed by moving both resync calls **inside** the loop, scoped to each
+batch's own date range, in the same transaction as that batch's insert —
+right before its `COMMIT`. Costs a bit more overall than resyncing once,
+but every batch is now fully self-contained: a later batch failing can
+never leave an earlier, already-committed batch's data un-deduped.
+
+**One-time remediation for data already affected** (any table that had a
+crashed run before this fix): re-run the full-table backfill documented in
+`mms_customer_sales_dedup.sql`:
+
+```sql
+SELECT app.resync_mms_duplicate_flags(
+    (SELECT min(date_time)::date FROM app.mms_customer_sales),
+    (SELECT max(date_time)::date FROM app.mms_customer_sales)
+);
+SELECT app.resync_mms_sales_summary(
+    (SELECT min(date_time)::date FROM app.mms_customer_sales),
+    (SELECT max(date_time)::date FROM app.mms_customer_sales)
+);
+```
+
+Safe to re-run regardless of whether this table was actually affected —
+both functions are idempotent full recomputes over whatever range they're
+given.

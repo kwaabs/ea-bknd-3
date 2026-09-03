@@ -29,6 +29,12 @@
 --   3. LEFT JOIN (confirmed): a MMS_SALES reading with no matching meter
 --      record still gets inserted, with all meter-dimension columns NULL,
 --      rather than being silently dropped.
+--   4. CONFIRMED LIVE: MMS_SALES."DATE_TIME" is stored as character
+--      varying (text), not a native timestamp — every read/comparison of
+--      it below casts explicitly with ::timestamptz. If it turns out to
+--      already be a real timestamp/timestamptz column on your database,
+--      the cast is a harmless no-op; it's only load-bearing in the
+--      varchar case.
 --
 -- Batching note: this is periodic snapshot data — plausibly millions of
 -- rows share the exact same DATE_TIME (one reading per meter per period,
@@ -167,10 +173,10 @@ BEGIN
          * largest meter among just those, not an arbitrary one.
          */
         WITH batch AS (
-            SELECT s."DATE_TIME" AS dt, s."METER_SERIAL_NUMBER" AS meter
+            SELECT s."DATE_TIME"::timestamptz AS dt, s."METER_SERIAL_NUMBER" AS meter
             FROM app."MMS_SALES" s
-            WHERE (s."DATE_TIME", s."METER_SERIAL_NUMBER") > (v_last_dt, v_last_meter)
-            ORDER BY s."DATE_TIME", s."METER_SERIAL_NUMBER"
+            WHERE (s."DATE_TIME"::timestamptz, s."METER_SERIAL_NUMBER") > (v_last_dt, v_last_meter)
+            ORDER BY s."DATE_TIME"::timestamptz, s."METER_SERIAL_NUMBER"
             LIMIT p_batch_size
         )
         SELECT
@@ -246,12 +252,12 @@ BEGIN
             s."STS_CREDIT_BALANCE_REMAINING",
             s."STS_LAST_MONTH_CREDIT_READ",
             s."STS_LAST_MONTH_KWH_READ",
-            s."DATE_TIME"
+            s."DATE_TIME"::timestamptz
         FROM app."MMS_SALES" s
         LEFT JOIN app.mms_customer_meter m
             ON lower(trim(m.meter_number)) = lower(trim(s."METER_SERIAL_NUMBER"))
-        WHERE (s."DATE_TIME", s."METER_SERIAL_NUMBER") > (v_last_dt, v_last_meter)
-          AND (s."DATE_TIME", s."METER_SERIAL_NUMBER") <= (v_batch_max_dt, v_batch_max_meter);
+        WHERE (s."DATE_TIME"::timestamptz, s."METER_SERIAL_NUMBER") > (v_last_dt, v_last_meter)
+          AND (s."DATE_TIME"::timestamptz, s."METER_SERIAL_NUMBER") <= (v_batch_max_dt, v_batch_max_meter);
 
         /*
          * Advance the cursor.

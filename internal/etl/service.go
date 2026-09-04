@@ -295,6 +295,8 @@ type JobInput struct {
 	BatchSize       int            `json:"batch_size"`
 	TimeoutSeconds  int            `json:"timeout_seconds"`
 	Enabled         bool           `json:"enabled"`
+	FilterQuery     *string        `json:"filter_query"`
+	FilterBatchSize *int           `json:"filter_batch_size"`
 }
 
 func (in *JobInput) applyDefaults() {
@@ -306,6 +308,15 @@ func (in *JobInput) applyDefaults() {
 	}
 	if in.TimeoutSeconds <= 0 {
 		in.TimeoutSeconds = 3600
+	}
+	if in.FilterQuery != nil && strings.TrimSpace(*in.FilterQuery) != "" {
+		if in.FilterBatchSize == nil || *in.FilterBatchSize <= 0 {
+			defaultBatch := defaultFilterBatchSize
+			in.FilterBatchSize = &defaultBatch
+		}
+	} else {
+		in.FilterQuery = nil
+		in.FilterBatchSize = nil
 	}
 }
 
@@ -350,6 +361,27 @@ func (in JobInput) validate() error {
 		if _, err := time.Parse("15:04", t); err != nil {
 			return fmt.Errorf("invalid trigger time %q, expected HH:MM (24h)", t)
 		}
+	}
+
+	hasFilterQuery := in.FilterQuery != nil && strings.TrimSpace(*in.FilterQuery) != ""
+	hasFilterToken := strings.Contains(in.SourceQuery, filterToken)
+	if hasFilterQuery {
+		// See extractAndLoadFiltered's comment in run.go for why chunked
+		// (filtered) pulls and incremental watermark advancement don't mix.
+		if in.Mode != ModeFullRefresh {
+			return fmt.Errorf("filter_query is only supported for %q jobs, not incremental", ModeFullRefresh)
+		}
+		if err := isReadOnlyQuery(*in.FilterQuery); err != nil {
+			return fmt.Errorf("filter_query: %w", err)
+		}
+		if !hasFilterToken {
+			return fmt.Errorf("source_query must reference %s when filter_query is set", filterToken)
+		}
+		if in.FilterBatchSize != nil && *in.FilterBatchSize <= 0 {
+			return errors.New("filter_batch_size must be positive")
+		}
+	} else if hasFilterToken {
+		return fmt.Errorf("source_query references %s but filter_query is not set", filterToken)
 	}
 
 	// Reuse the same identifier and query-shape validation the engine
@@ -487,6 +519,8 @@ func jobFromInput(id string, in JobInput) *Job {
 		BatchSize:       in.BatchSize,
 		TimeoutSeconds:  in.TimeoutSeconds,
 		Enabled:         in.Enabled,
+		FilterQuery:     in.FilterQuery,
+		FilterBatchSize: in.FilterBatchSize,
 	}
 }
 
@@ -511,7 +545,7 @@ func (s *Service) UpdateJob(ctx context.Context, id string, in JobInput) (*Job, 
 	res, err := s.db.NewUpdate().Model(job).
 		Column("name", "source_id", "source_query", "dest_schema", "dest_table", "dest_columns",
 			"mode", "watermark_column", "watermark_type", "conflict_columns", "trigger_times",
-			"batch_size", "timeout_seconds", "enabled").
+			"batch_size", "timeout_seconds", "enabled", "filter_query", "filter_batch_size").
 		Set("updated_at = now()").
 		WherePK().
 		Exec(ctx)

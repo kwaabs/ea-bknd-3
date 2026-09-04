@@ -98,6 +98,18 @@ type Job struct {
 	BatchSize       int            `bun:"batch_size"            json:"batch_size"`
 	TimeoutSeconds  int            `bun:"timeout_seconds"       json:"timeout_seconds"`
 	Enabled         bool           `bun:"enabled"                json:"enabled"`
+
+	// FilterQuery, when set, is a SELECT run against THIS app database
+	// (never the external source — see loadFilterValues in run.go) whose
+	// single result column seeds the {{FILTER}} token in SourceQuery,
+	// chunked into FilterBatchSize-sized groups (one source_query run per
+	// chunk). This is how a job pulls only the rows matching a list of
+	// keys that live in this database (e.g. app.meters) — the engine has
+	// no other way to reach across a job's one external source and this
+	// app database in a single query. Only valid for mode=full_refresh
+	// (see extractAndLoadFiltered's comment for why).
+	FilterQuery     *string `bun:"filter_query"      json:"filter_query"`
+	FilterBatchSize *int    `bun:"filter_batch_size" json:"filter_batch_size"`
 }
 
 // JobState is the incremental watermark for a job — same "persist right

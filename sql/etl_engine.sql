@@ -120,6 +120,21 @@ CREATE TABLE IF NOT EXISTS app.etl_jobs (
     -- extract, the same shape as the raw MMS_SALES table this whole
     -- pattern was modeled on).
     conflict_columns text[] NULL,
+    -- Seeds the {{FILTER}} token in source_query: when set, filter_query is
+    -- run against THIS app database (never the external source — it's a
+    -- plain SELECT here, executed by the same Postgres connection this
+    -- schema lives in) before every run, its single result column chunked
+    -- into filter_batch_size-sized groups, and source_query is run once per
+    -- chunk with {{FILTER}} replaced by that chunk's values as a SQL IN(...)
+    -- literal list. This is how a job can pull only the source rows that
+    -- match a list of keys living in THIS database (e.g. "only meters in
+    -- app.meters") without a live cross-database join, which a job's single
+    -- external source connection can't do on its own. Restricted to
+    -- mode = 'full_refresh' below — see internal/etl/run.go's
+    -- extractAndLoadFiltered comment for why chunked pulls and incremental
+    -- watermark advancement don't mix.
+    filter_query      text NULL,
+    filter_batch_size integer NULL,
     -- Times of night to trigger this job, as "HH:MM" 24h strings,
     -- server-clock (UTC — see scheduler.nextUTCMidnight's comment: Ghana
     -- has no DST, so UTC == Ghana local time year-round, same assumption
@@ -144,7 +159,11 @@ CREATE TABLE IF NOT EXISTS app.etl_jobs (
     -- Postgres 16 while writing this). cardinality() returns a real 0 for
     -- an empty array, so this actually rejects it.
     CONSTRAINT etl_jobs_trigger_times_nonempty CHECK (cardinality(trigger_times) > 0),
-    CONSTRAINT etl_jobs_trigger_times_format CHECK (app.etl_valid_trigger_times(trigger_times))
+    CONSTRAINT etl_jobs_trigger_times_format CHECK (app.etl_valid_trigger_times(trigger_times)),
+    CONSTRAINT etl_jobs_filter_requires_full_refresh
+        CHECK (filter_query IS NULL OR mode = 'full_refresh'),
+    CONSTRAINT etl_jobs_filter_batch_size_positive
+        CHECK (filter_batch_size IS NULL OR filter_batch_size > 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_etl_jobs_source_id ON app.etl_jobs (source_id);
@@ -205,4 +224,23 @@ CREATE INDEX IF NOT EXISTS idx_etl_job_runs_job_started
 --     'timestamp',
 --     ARRAY['01:00', '03:30'],
 --     5000
+-- FROM app.etl_sources WHERE name = 'oracle_finance';
+--
+-- Example: same idea, but only for meters this app already knows about —
+-- filter_query runs against THIS database (app.meters), not Oracle;
+-- {{FILTER}} is substituted per filter_batch_size-sized chunk of the
+-- meter numbers it returns. Note mode is 'full_refresh' — filter_query
+-- requires it (see etl_jobs_filter_requires_full_refresh above).
+-- INSERT INTO app.etl_jobs (name, source_id, source_query, dest_table, dest_columns, mode, trigger_times, batch_size, filter_query, filter_batch_size)
+-- SELECT
+--     'oracle_finance_meter_readings',
+--     id,
+--     'SELECT meter_number, reading_value, reading_date FROM meter_readings WHERE meter_number IN ({{FILTER}})',
+--     'raw_oracle_meter_readings',
+--     ARRAY['meter_number', 'reading_value', 'reading_date'],
+--     'full_refresh',
+--     ARRAY['02:00'],
+--     5000,
+--     'SELECT meter_number FROM app.meters WHERE status = ''active''',
+--     1000
 -- FROM app.etl_sources WHERE name = 'oracle_finance';

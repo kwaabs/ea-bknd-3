@@ -42,7 +42,12 @@ func TestBuildInsertSQL_Plain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	wantQuery := `INSERT INTO "app"."raw_invoices" ("id", "amount") VALUES ($1, $2), ($3, $4)`
+	// "?", not "$1, $2, ...": loadBatch executes this through bun's
+	// NewRaw, which expects bun's own placeholder convention — see
+	// loadBatch's comment in run.go for why a literal "$N" placeholder
+	// doesn't actually bind when run through bun's query methods
+	// (confirmed against a real Postgres 16 while fixing this).
+	wantQuery := `INSERT INTO "app"."raw_invoices" ("id", "amount") VALUES (?, ?), (?, ?)`
 	if query != wantQuery {
 		t.Errorf("query = %q, want %q", query, wantQuery)
 	}
@@ -257,6 +262,100 @@ func TestJobInputValidate_IncrementalRequiresWatermarkInDestColumns(t *testing.T
 	}
 	if err := in.validate(); err == nil {
 		t.Fatal("expected validation error when watermark_column is missing from dest_columns, got none")
+	}
+}
+
+func TestFormatFilterLiteral(t *testing.T) {
+	got, err := formatFilterLiteral([]interface{}{"M001", "M'02", int64(3), 4.5})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := `'M001', 'M''02', 3, 4.5`
+	if got != want {
+		t.Errorf("formatFilterLiteral = %q, want %q", got, want)
+	}
+}
+
+func TestBuildFilteredQuery(t *testing.T) {
+	job := Job{Name: "j", SourceQuery: "SELECT id FROM t WHERE id IN ({{FILTER}})"}
+	got, err := buildFilteredQuery(job, "'A', 'B'")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "SELECT id FROM t WHERE id IN ('A', 'B')"
+	if got != want {
+		t.Errorf("buildFilteredQuery = %q, want %q", got, want)
+	}
+
+	missingToken := Job{Name: "j", SourceQuery: "SELECT id FROM t"}
+	if _, err := buildFilteredQuery(missingToken, "'A'"); err == nil {
+		t.Fatal("expected error when source_query has no {{FILTER}} token, got none")
+	}
+}
+
+func TestJobInputValidate_FilterQueryRequiresFullRefresh(t *testing.T) {
+	wt := WatermarkTimestamp
+	col := "updated_at"
+	filterQ := "SELECT meter_number FROM app.meters"
+	in := JobInput{
+		Name:            "job",
+		SourceID:        "some-source",
+		SourceQuery:     "SELECT id, updated_at FROM t WHERE id IN ({{FILTER}}) AND updated_at > {{WATERMARK}} ORDER BY updated_at",
+		DestColumns:     []string{"id", "updated_at"},
+		Mode:            ModeIncremental,
+		WatermarkColumn: &col,
+		WatermarkType:   &wt,
+		TriggerTimes:    []string{"01:00"},
+		FilterQuery:     &filterQ,
+	}
+	if err := in.validate(); err == nil {
+		t.Fatal("expected validation error for filter_query combined with incremental mode, got none")
+	}
+}
+
+func TestJobInputValidate_FilterQueryRequiresTokenInSourceQuery(t *testing.T) {
+	filterQ := "SELECT meter_number FROM app.meters"
+	in := JobInput{
+		Name:         "job",
+		SourceID:     "some-source",
+		SourceQuery:  "SELECT id FROM t", // no {{FILTER}} token
+		DestColumns:  []string{"id"},
+		Mode:         ModeFullRefresh,
+		TriggerTimes: []string{"01:00"},
+		FilterQuery:  &filterQ,
+	}
+	if err := in.validate(); err == nil {
+		t.Fatal("expected validation error when source_query doesn't reference {{FILTER}}, got none")
+	}
+}
+
+func TestJobInputValidate_FilterTokenRequiresFilterQuery(t *testing.T) {
+	in := JobInput{
+		Name:         "job",
+		SourceID:     "some-source",
+		SourceQuery:  "SELECT id FROM t WHERE id IN ({{FILTER}})", // token present, no filter_query
+		DestColumns:  []string{"id"},
+		Mode:         ModeFullRefresh,
+		TriggerTimes: []string{"01:00"},
+	}
+	if err := in.validate(); err == nil {
+		t.Fatal("expected validation error when {{FILTER}} is referenced but filter_query is unset, got none")
+	}
+}
+
+func TestJobInputValidate_FilterQueryMustBeReadOnly(t *testing.T) {
+	filterQ := "DELETE FROM app.meters"
+	in := JobInput{
+		Name:         "job",
+		SourceID:     "some-source",
+		SourceQuery:  "SELECT id FROM t WHERE id IN ({{FILTER}})",
+		DestColumns:  []string{"id"},
+		Mode:         ModeFullRefresh,
+		TriggerTimes: []string{"01:00"},
+		FilterQuery:  &filterQ,
+	}
+	if err := in.validate(); err == nil {
+		t.Fatal("expected validation error for a non-SELECT filter_query, got none")
 	}
 }
 

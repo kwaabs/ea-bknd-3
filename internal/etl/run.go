@@ -45,16 +45,27 @@ func runJob(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job Job) (run
 	return result, nil
 }
 
-// extractAndLoad streams job.SourceQuery's result set from sourceDB,
-// batches rows into groups of job.BatchSize, and loads each batch into the
-// destination table in its own transaction (batch insert + watermark
-// update together — same "commit the checkpoint with the data it
-// describes" contract as app.migration_checkpoints elsewhere in this
-// repo). A failure partway through a run leaves every already-committed
-// batch in place and the watermark advanced up to it; re-running the job
-// resumes from there rather than re-pulling everything.
+// extractAndLoad decides how job.SourceQuery gets run — once (the plain
+// case) or once per chunk of job.FilterQuery's results (see
+// extractAndLoadFiltered) — and delegates the actual streaming
+// extract+batch+load work to runExtractQuery either way.
 func extractAndLoad(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job Job) (runResult, error) {
 	var result runResult
+
+	wmIdx := -1
+	if job.Mode == ModeIncremental {
+		wmIdx = indexOf(job.DestColumns, *job.WatermarkColumn)
+		if wmIdx == -1 {
+			return result, fmt.Errorf("etl: job %q: watermark_column %q not found in dest_columns", job.Name, *job.WatermarkColumn)
+		}
+	}
+
+	if job.FilterQuery != nil && strings.TrimSpace(*job.FilterQuery) != "" {
+		// JobInput.validate requires mode=full_refresh whenever
+		// filter_query is set, so wmIdx is always -1 here — see
+		// extractAndLoadFiltered's comment for why the two don't mix.
+		return extractAndLoadFiltered(ctx, destDB, sourceDB, job)
+	}
 
 	lastWatermark := defaultWatermarkFor(job)
 	if job.Mode == ModeIncremental {
@@ -72,13 +83,119 @@ func extractAndLoad(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job J
 		return result, err
 	}
 
-	wmIdx := -1
-	if job.Mode == ModeIncremental {
-		wmIdx = indexOf(job.DestColumns, *job.WatermarkColumn)
-		if wmIdx == -1 {
-			return result, fmt.Errorf("etl: job %q: watermark_column %q not found in dest_columns", job.Name, *job.WatermarkColumn)
+	return runExtractQuery(ctx, destDB, sourceDB, job, query, wmIdx)
+}
+
+const defaultFilterBatchSize = 1000
+
+// extractAndLoadFiltered runs job.FilterQuery once against destDB — this
+// app database, not the external source — to get the values that seed
+// {{FILTER}}, chunks them into job.FilterBatchSize-sized groups, and runs
+// job.SourceQuery (with {{FILTER}} substituted per chunk) through the same
+// runExtractQuery loop as a plain job, once per chunk, summing the totals.
+// This is how a job pulls only the rows matching a list of keys that live
+// in this app database (e.g. app.meters) without a live cross-database
+// join, which this engine's single-source-per-job connectors can't do —
+// see ETL.md.
+//
+// Restricted to mode=full_refresh (enforced in JobInput.validate): the
+// "advance the watermark using the last row of each flushed batch"
+// contract loadBatch relies on assumes one continuous, ORDER-BY-watermark
+// result set. Filter chunks are independent, arbitrarily-ordered result
+// sets (different key subsets, no relative ordering between them), so
+// there's no sound way to compute one true watermark across all of
+// them — advancing per-chunk risks skipping rows a later chunk should
+// still have picked up. Rather than get that subtly wrong, incremental +
+// filtered just isn't supported.
+func extractAndLoadFiltered(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job Job) (runResult, error) {
+	var total runResult
+
+	values, err := loadFilterValues(ctx, destDB, *job.FilterQuery)
+	if err != nil {
+		return total, fmt.Errorf("etl: job %q: run filter_query: %w", job.Name, err)
+	}
+	if len(values) == 0 {
+		return total, nil // nothing matches the filter this run — not an error
+	}
+
+	batchSize := defaultFilterBatchSize
+	if job.FilterBatchSize != nil && *job.FilterBatchSize > 0 {
+		batchSize = *job.FilterBatchSize
+	}
+
+	for start := 0; start < len(values); start += batchSize {
+		end := start + batchSize
+		if end > len(values) {
+			end = len(values)
+		}
+		literal, err := formatFilterLiteral(values[start:end])
+		if err != nil {
+			return total, fmt.Errorf("etl: job %q: %w", job.Name, err)
+		}
+		query, err := buildFilteredQuery(job, literal)
+		if err != nil {
+			return total, err
+		}
+		chunkResult, err := runExtractQuery(ctx, destDB, sourceDB, job, query, -1)
+		total.RowsExtracted += chunkResult.RowsExtracted
+		total.RowsLoaded += chunkResult.RowsLoaded
+		if err != nil {
+			return total, fmt.Errorf("etl: job %q: filter batch [%d,%d): %w", job.Name, start, end, err)
 		}
 	}
+	return total, nil
+}
+
+// loadFilterValues runs a job's filter_query against destDB (this app
+// database) and returns its single result column's values, in row order —
+// dedup/ordering, if wanted, is filter_query's own job (e.g. SELECT
+// DISTINCT meter_number FROM app.meters ORDER BY meter_number). Rejects a
+// query returning more than one column up front, rather than letting
+// rows.Scan fail on the first row with a less useful error.
+func loadFilterValues(ctx context.Context, destDB *bun.DB, filterQuery string) ([]interface{}, error) {
+	rows, err := destDB.QueryContext(ctx, filterQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	if len(cols) != 1 {
+		return nil, fmt.Errorf("filter_query must return exactly one column, got %d", len(cols))
+	}
+
+	var values []interface{}
+	for rows.Next() {
+		var v interface{}
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		if v == nil {
+			continue // a NULL key can never match anything — skip rather than error
+		}
+		values = append(values, normalizeValue(v))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+// runExtractQuery streams the given (already-built) query's result set
+// from sourceDB, batches rows into groups of job.BatchSize, and loads each
+// batch into the destination table in its own transaction (batch insert +
+// watermark update together — same "commit the checkpoint with the data
+// it describes" contract as app.migration_checkpoints elsewhere in this
+// repo). A failure partway through leaves every already-committed batch in
+// place and the watermark (if any) advanced up to it. Shared by the plain
+// single-query path and the filtered path (extractAndLoadFiltered calls
+// this once per filter chunk) — everything past "here is the query text
+// to run" is identical either way.
+func runExtractQuery(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job Job, query string, wmIdx int) (runResult, error) {
+	var result runResult
 
 	rows, err := sourceDB.QueryContext(ctx, query)
 	if err != nil {
@@ -170,7 +287,18 @@ func loadBatch(ctx context.Context, destDB *bun.DB, job Job, batch [][]interface
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+	// bun.Tx (and bun.DB)'s ExecContext implements the stdlib sql.Tx
+	// signature for drop-in compatibility, but doesn't actually bind
+	// literal Postgres "$1"-style placeholders the way sql.Tx.ExecContext
+	// does — it expects bun's own "?" placeholder convention (used by
+	// every other raw query in this package, e.g. crypto.go's
+	// pgp_sym_encrypt/decrypt calls) and rewrites those into positional
+	// params itself. A hand-built "$1, $2, ..." query run through it comes
+	// back "ERROR: there is no parameter $1" (confirmed against a real
+	// Postgres 16 while building this) — NewRaw is bun's own raw-query
+	// path and handles "?" correctly, so that's what buildInsertSQL now
+	// emits.
+	if _, err := tx.NewRaw(query, args...).Exec(ctx); err != nil {
 		return fmt.Errorf("etl: insert batch for job %q: %w", job.Name, err)
 	}
 
@@ -235,8 +363,12 @@ func buildInsertSQL(job Job, batch [][]interface{}) (string, []interface{}, erro
 	sb.WriteString(strings.Join(colIdents, ", "))
 	sb.WriteString(") VALUES ")
 
+	// "?" (bun's own placeholder convention), not hand-numbered "$1, $2,
+	// ...": bun's NewRaw (which loadBatch executes this through) rewrites
+	// "?" into the driver's real positional params itself — see
+	// loadBatch's comment for why a literal "$1"-style placeholder run
+	// through bun's query methods doesn't actually bind.
 	args := make([]interface{}, 0, len(batch)*len(job.DestColumns))
-	argN := 1
 	for rowIdx, row := range batch {
 		if rowIdx > 0 {
 			sb.WriteString(", ")
@@ -246,9 +378,7 @@ func buildInsertSQL(job Job, batch [][]interface{}) (string, []interface{}, erro
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			sb.WriteString("$")
-			sb.WriteString(strconv.Itoa(argN))
-			argN++
+			sb.WriteString("?")
 			args = append(args, v)
 		}
 		sb.WriteString(")")

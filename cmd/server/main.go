@@ -4,6 +4,7 @@ import (
 	"bknd-3/internal/cache"
 	"bknd-3/internal/config"
 	"bknd-3/internal/database"
+	"bknd-3/internal/etl"
 	"bknd-3/internal/logger"
 	"bknd-3/internal/routes"
 	"bknd-3/internal/scheduler"
@@ -51,6 +52,7 @@ func main() {
 	schedulerCtx, stopScheduler := context.WithCancel(context.Background())
 	defer stopScheduler()
 	scheduler.StartDailySessionReset(schedulerCtx, authSvc, logr)
+	etl.Start(schedulerCtx, db, cfg, logr)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,

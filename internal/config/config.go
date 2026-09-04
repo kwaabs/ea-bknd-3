@@ -35,6 +35,13 @@ type Config struct {
 	RedisURL      string        // empty disables caching
 	CacheTTLShort time.Duration // volatile ranges (include today)
 	CacheTTLLong  time.Duration // immutable historical ranges
+
+	// ETL engine (internal/etl) — Oracle/MSSQL/Postgres source pulls on a
+	// nightly schedule. ETLWorkers bounds how many jobs can extract
+	// concurrently; ETLReloadInterval is how often app.etl_sources/
+	// app.etl_jobs are re-read for new/edited rows.
+	ETLWorkers        int
+	ETLReloadInterval time.Duration
 }
 
 // Load loads environment variables and returns a Config struct
@@ -46,6 +53,9 @@ func Load() *Config {
 
 	cacheTTLShortSec, _ := strconv.Atoi(getEnv("CACHE_TTL_SHORT_SECONDS", "120")) // 2m
 	cacheTTLLongSec, _ := strconv.Atoi(getEnv("CACHE_TTL_LONG_SECONDS", "21600")) // 6h
+
+	etlWorkers, _ := strconv.Atoi(getEnv("ETL_WORKERS", "3"))
+	etlReloadSec, _ := strconv.Atoi(getEnv("ETL_RELOAD_INTERVAL_SECONDS", "300")) // 5m
 
 	// Parse allowed origins from env (comma-separated)
 	allowedOrigins := strings.Split(
@@ -72,6 +82,9 @@ func Load() *Config {
 		RedisURL:      getEnv("REDIS_URL", ""),
 		CacheTTLShort: time.Duration(cacheTTLShortSec) * time.Second,
 		CacheTTLLong:  time.Duration(cacheTTLLongSec) * time.Second,
+
+		ETLWorkers:        etlWorkers,
+		ETLReloadInterval: time.Duration(etlReloadSec) * time.Second,
 	}
 }
 

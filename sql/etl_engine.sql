@@ -74,6 +74,28 @@ CREATE TABLE IF NOT EXISTS app.etl_sources (
 -- procedures elsewhere in this repo are hand-verified once, not
 -- dynamically introspected).
 -- ---------------------------------------------------------------------
+
+-- Postgres CHECK constraints can never contain a subquery (not even
+-- EXISTS/unnest() wrapped in one) — "cannot use subquery in check
+-- constraint" is a hard parser limitation, not something a rewrite of the
+-- WHERE clause can dodge. The standard workaround is exactly this: move
+-- the per-element validation into its own IMMUTABLE SQL function (a
+-- function body is not syntactically a "subquery in the CHECK
+-- expression" as far as the constraint is concerned — the CHECK is just
+-- a function call) and CHECK that function's result instead. Empty-array
+-- input is treated as vacuously valid here on purpose — enforcing
+-- "non-empty" is etl_jobs_trigger_times_nonempty's job alone, so the two
+-- constraints don't both fire (with different reasons) for the same
+-- empty-array row.
+CREATE OR REPLACE FUNCTION app.etl_valid_trigger_times(times text[])
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $$
+    SELECT COALESCE(bool_and(t ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'), true)
+    FROM unnest(times) AS t;
+$$;
+
 CREATE TABLE IF NOT EXISTS app.etl_jobs (
     id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     name             text NOT NULL UNIQUE,
@@ -115,9 +137,14 @@ CREATE TABLE IF NOT EXISTS app.etl_jobs (
     updated_at       timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT etl_jobs_watermark_required_for_incremental
         CHECK (mode = 'full_refresh' OR (watermark_column IS NOT NULL AND watermark_type IS NOT NULL)),
-    CONSTRAINT etl_jobs_trigger_times_nonempty CHECK (array_length(trigger_times, 1) > 0),
-    CONSTRAINT etl_jobs_trigger_times_format
-        CHECK (NOT EXISTS (SELECT 1 FROM unnest(trigger_times) t WHERE t !~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'))
+    -- cardinality(), not array_length() — array_length() returns NULL
+    -- (not 0) for an empty array, and a CHECK only rejects an explicit
+    -- FALSE, never NULL, so `array_length(trigger_times, 1) > 0` would
+    -- silently let an empty array through (confirmed against a live
+    -- Postgres 16 while writing this). cardinality() returns a real 0 for
+    -- an empty array, so this actually rejects it.
+    CONSTRAINT etl_jobs_trigger_times_nonempty CHECK (cardinality(trigger_times) > 0),
+    CONSTRAINT etl_jobs_trigger_times_format CHECK (app.etl_valid_trigger_times(trigger_times))
 );
 
 CREATE INDEX IF NOT EXISTS idx_etl_jobs_source_id ON app.etl_jobs (source_id);

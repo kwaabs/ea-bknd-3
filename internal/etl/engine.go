@@ -22,11 +22,12 @@ import (
 // Engine.workers extracts ever run at once regardless of how many jobs
 // happen to fire around the same time.
 type Engine struct {
-	db       *bun.DB
-	logr     *logger.Logger
-	workers  int
-	reload_  time.Duration
-	dispatch chan Job
+	db             *bun.DB
+	logr           *logger.Logger
+	workers        int
+	reload_        time.Duration
+	dispatch       chan Job
+	credentialsKey string // config.ETLCredentialsKey — see crypto.go
 
 	mu          sync.Mutex
 	jobsByID    map[string]Job
@@ -52,17 +53,22 @@ func Start(ctx context.Context, db *bun.DB, cfg *config.Config, logr *logger.Log
 		reloadEvery = 5 * time.Minute
 	}
 
+	if cfg.ETLCredentialsKey == "" {
+		logr.Warn("etl: ETL_CREDENTIALS_ENCRYPTION_KEY is not set — any source with a password will fail to connect")
+	}
+
 	e := &Engine{
-		db:          db,
-		logr:        logr,
-		workers:     workers,
-		reload_:     reloadEvery,
-		dispatch:    make(chan Job, 32),
-		jobsByID:    make(map[string]Job),
-		sourcesByID: make(map[string]Source),
-		sourcePools: make(map[string]*sql.DB),
-		cancelFuncs: make(map[string]context.CancelFunc),
-		running:     make(map[string]bool),
+		db:             db,
+		logr:           logr,
+		workers:        workers,
+		reload_:        reloadEvery,
+		dispatch:       make(chan Job, 32),
+		credentialsKey: cfg.ETLCredentialsKey,
+		jobsByID:       make(map[string]Job),
+		sourcesByID:    make(map[string]Source),
+		sourcePools:    make(map[string]*sql.DB),
+		cancelFuncs:    make(map[string]context.CancelFunc),
+		running:        make(map[string]bool),
 	}
 
 	for i := 0; i < workers; i++ {
@@ -205,7 +211,7 @@ func (e *Engine) runOnce(ctx context.Context, job Job) {
 	}
 	defer e.unlock(job.ID)
 
-	sourceDB, err := e.sourceFor(job.SourceID)
+	sourceDB, err := e.sourceFor(ctx, job.SourceID)
 	if err != nil {
 		e.logr.Error("etl: cannot reach source", zap.String("job", job.Name), zap.Error(err))
 		return
@@ -251,27 +257,45 @@ func (e *Engine) unlock(jobID string) {
 }
 
 // sourceFor returns a cached *sql.DB for a source, opening one on first
-// use. sql.Open only constructs the pool object and validates the DSN — it
-// doesn't dial anything — so holding e.mu across it is not a blocking
-// network call. A source disabled/deleted after its pool was opened keeps
-// being served from cache until the process restarts; not reconciled here
-// since jobs are already filtered to `enabled` in reload (a v1
-// simplification, not a correctness issue for the common case of a job
-// simply being disabled rather than its source ripped out from under it).
-func (e *Engine) sourceFor(sourceID string) (*sql.DB, error) {
+// use. Decrypting the source's password is a real Postgres round trip
+// (unlike sql.Open, which only constructs the pool object and doesn't
+// dial anything), so it happens OUTSIDE e.mu — only the map reads/writes
+// around it are guarded, avoiding a slow decrypt (or an external source
+// actually being dialed inside sql.Open's DSN validation) blocking every
+// other Engine operation. A second caller racing to open the same
+// first-use source is resolved by re-checking the cache once the new pool
+// is ready, keeping whichever one won. A source disabled/deleted after its
+// pool was opened keeps being served from cache until the process
+// restarts; not reconciled here since jobs are already filtered to
+// `enabled` in reload (a v1 simplification, not a correctness issue for
+// the common case of a job simply being disabled rather than its source
+// ripped out from under it).
+func (e *Engine) sourceFor(ctx context.Context, sourceID string) (*sql.DB, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	if db, ok := e.sourcePools[sourceID]; ok {
+		e.mu.Unlock()
 		return db, nil
 	}
 	src, ok := e.sourcesByID[sourceID]
+	e.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("etl: source %s not found or disabled", sourceID)
 	}
-	db, err := openSource(src)
+
+	password, err := decryptPassword(ctx, e.db, e.credentialsKey, src.PasswordEncrypted)
 	if err != nil {
 		return nil, err
+	}
+	db, err := openSource(src, password)
+	if err != nil {
+		return nil, err
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if existing, ok := e.sourcePools[sourceID]; ok {
+		_ = db.Close()
+		return existing, nil
 	}
 	e.sourcePools[sourceID] = db
 	return db, nil
@@ -290,7 +314,11 @@ func (e *Engine) openSourceByID(ctx context.Context, sourceID string) (*sql.DB, 
 	if err := e.db.NewSelect().Model(src).Where("id = ?", sourceID).Scan(ctx); err != nil {
 		return nil, fmt.Errorf("etl: source not found: %w", err)
 	}
-	return openSource(*src)
+	password, err := decryptPassword(ctx, e.db, e.credentialsKey, src.PasswordEncrypted)
+	if err != nil {
+		return nil, err
+	}
+	return openSource(*src, password)
 }
 
 // TriggerNow runs a job immediately, outside its normal schedule — the

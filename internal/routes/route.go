@@ -9,6 +9,7 @@ import (
 	"bknd-3/internal/cache"
 	"bknd-3/internal/comments"
 	"bknd-3/internal/config"
+	"bknd-3/internal/etl"
 	"bknd-3/internal/feedback"
 	"bknd-3/internal/feeders"
 	"bknd-3/internal/handlers"
@@ -36,7 +37,7 @@ import (
 	"github.com/go-chi/cors"
 )
 
-func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cache) (http.Handler, *services.AuthService) {
+func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cache, etlEngine *etl.Engine) (http.Handler, *services.AuthService) {
 	r := chi.NewRouter()
 
 	// Response cache for heavy, idempotent GET endpoints. No-op when c is nil.
@@ -81,6 +82,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 	notifyEmailSvc := notifyemail.NewService(db)
 	meterHandler := meters.NewHandler(meters.NewService(db, notifyEmailSvc), logr.Logger)
 	meterMetricsHandler := handlers.NewMeterMetricsHandler(meterMetricsSvc, logr.Logger)
+	etlHandler := etl.NewHandler(etl.NewService(db, notifyEmailSvc, etlEngine), logr.Logger)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -247,6 +249,29 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 			r.Post("/", meterHandler.CreateExpressFeeder)
 			r.Put("/{id}", meterHandler.UpdateExpressFeeder)
 			r.Delete("/{id}", meterHandler.SoftDeleteExpressFeeder)
+		})
+
+		// ETL admin — CRUD for app.etl_sources/app.etl_jobs, ad-hoc
+		// read-only test queries, run-now, and run history. Same
+		// allowlist/JWT gating as /meters/admin and /express-feeders/admin
+		// above. See internal/etl and ETL.md.
+		r.Route("/etl/admin", func(r chi.Router) {
+			r.Use(authMW.JWTAuth)
+			r.Get("/sources", etlHandler.ListSources)
+			r.Post("/sources", etlHandler.CreateSource)
+			r.Put("/sources/{id}", etlHandler.UpdateSource)
+			r.Delete("/sources/{id}", etlHandler.DeleteSource)
+			r.Post("/sources/{id}/test-connection", etlHandler.TestSourceConnection)
+
+			r.Get("/jobs", etlHandler.ListJobs)
+			r.Post("/jobs", etlHandler.CreateJob)
+			r.Put("/jobs/{id}", etlHandler.UpdateJob)
+			r.Delete("/jobs/{id}", etlHandler.DeleteJob)
+			r.Post("/jobs/{id}/run", etlHandler.RunJobNow)
+			r.Get("/jobs/{id}/runs", etlHandler.ListJobRuns)
+			r.Get("/jobs/{id}/state", etlHandler.GetJobState)
+
+			r.Post("/test-query", etlHandler.TestQuery)
 		})
 
 		r.Mount("/feeders", feeders.Routes(db, logr.Logger))

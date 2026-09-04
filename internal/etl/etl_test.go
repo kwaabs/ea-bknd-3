@@ -196,6 +196,69 @@ func TestNormalizeValue_BytesBecomeString(t *testing.T) {
 	}
 }
 
+func TestIsReadOnlyQuery(t *testing.T) {
+	valid := []string{
+		"SELECT * FROM invoices",
+		"  select id from t  ",
+		"WITH x AS (SELECT 1) SELECT * FROM x",
+		"SELECT COUNT(*) FROM invoices",
+		"SELECT COUNT(DISTINCT customer_id) FROM invoices;",
+	}
+	for _, q := range valid {
+		if err := isReadOnlyQuery(q); err != nil {
+			t.Errorf("isReadOnlyQuery(%q) unexpected error: %v", q, err)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"DROP TABLE invoices",
+		"DELETE FROM invoices",
+		"UPDATE invoices SET amount = 0",
+		"SELECT * FROM invoices; DROP TABLE invoices",
+		"SELECT * FROM invoices WHERE 1=1; DELETE FROM invoices",
+		"EXEC sp_who",
+		"INSERT INTO invoices VALUES (1)",
+	}
+	for _, q := range invalid {
+		if err := isReadOnlyQuery(q); err == nil {
+			t.Errorf("isReadOnlyQuery(%q) expected error, got none", q)
+		}
+	}
+}
+
+func TestJobInputValidate_RejectsNonSelectSourceQuery(t *testing.T) {
+	in := JobInput{
+		Name:         "bad-job",
+		SourceID:     "some-source",
+		SourceQuery:  "DELETE FROM invoices",
+		DestColumns:  []string{"id"},
+		Mode:         ModeFullRefresh,
+		TriggerTimes: []string{"01:00"},
+	}
+	if err := in.validate(); err == nil {
+		t.Fatal("expected validation error for a non-SELECT source_query, got none")
+	}
+}
+
+func TestJobInputValidate_IncrementalRequiresWatermarkInDestColumns(t *testing.T) {
+	wt := WatermarkTimestamp
+	col := "updated_at"
+	in := JobInput{
+		Name:            "job",
+		SourceID:        "some-source",
+		SourceQuery:     "SELECT id FROM t WHERE updated_at > {{WATERMARK}} ORDER BY updated_at",
+		DestColumns:     []string{"id"}, // missing "updated_at"
+		Mode:            ModeIncremental,
+		WatermarkColumn: &col,
+		WatermarkType:   &wt,
+		TriggerTimes:    []string{"01:00"},
+	}
+	if err := in.validate(); err == nil {
+		t.Fatal("expected validation error when watermark_column is missing from dest_columns, got none")
+	}
+}
+
 func TestWatermarkToString(t *testing.T) {
 	if _, err := watermarkToString(nil); err == nil {
 		t.Error("expected error for NULL watermark value")

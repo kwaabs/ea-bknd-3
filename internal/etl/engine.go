@@ -277,6 +277,88 @@ func (e *Engine) sourceFor(sourceID string) (*sql.DB, error) {
 	return db, nil
 }
 
+// openSourceByID fetches a source fresh from Postgres by id (ignoring the
+// enabled flag — a human explicitly testing or manually running a job
+// should be able to do so against a source that's still being set up, not
+// yet flipped on for the nightly schedule) and opens a throwaway
+// connection to it. Unlike sourceFor (used by the scheduler), this never
+// reads or writes Engine's pooled sourcePools cache — every call opens
+// fresh so it always reflects the source's current config; the caller
+// owns closing the returned *sql.DB.
+func (e *Engine) openSourceByID(ctx context.Context, sourceID string) (*sql.DB, error) {
+	src := new(Source)
+	if err := e.db.NewSelect().Model(src).Where("id = ?", sourceID).Scan(ctx); err != nil {
+		return nil, fmt.Errorf("etl: source not found: %w", err)
+	}
+	return openSource(*src)
+}
+
+// TriggerNow runs a job immediately, outside its normal schedule — the
+// admin API's "Run now" action. Works regardless of the job's or its
+// source's enabled flag (the point is letting an operator validate a job
+// before flipping it on for the nightly schedule). Fetches the job fresh
+// from Postgres rather than Engine's cache, so it reflects any edit made
+// moments ago that hasn't reached the next reload cycle.
+//
+// Returns as soon as the run-history row exists (fast) — the actual
+// extract+load happens in a background goroutine, since it can run far
+// longer than an HTTP request should stay open. Callers poll
+// app.etl_job_runs (Service.ListRuns) by the returned run id for status.
+func (e *Engine) TriggerNow(ctx context.Context, jobID string) (int64, error) {
+	job := new(Job)
+	if err := e.db.NewSelect().Model(job).Where("id = ?", jobID).Scan(ctx); err != nil {
+		return 0, fmt.Errorf("etl: job not found: %w", err)
+	}
+
+	if !e.tryLock(job.ID) {
+		return 0, fmt.Errorf("job %q already has a run in progress", job.Name)
+	}
+
+	sourceDB, err := e.openSourceByID(ctx, job.SourceID)
+	if err != nil {
+		e.unlock(job.ID)
+		return 0, err
+	}
+
+	runID, err := insertRunStarted(ctx, e.db, job.ID)
+	if err != nil {
+		e.unlock(job.ID)
+		_ = sourceDB.Close()
+		return 0, fmt.Errorf("record run start: %w", err)
+	}
+
+	go func() {
+		defer e.unlock(job.ID)
+		defer func() { _ = sourceDB.Close() }()
+
+		timeout := time.Duration(job.TimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = time.Hour
+		}
+		runCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		result, runErr := extractAndLoad(runCtx, e.db, sourceDB, *job)
+		status := RunStatusSuccess
+		errMsg := ""
+		if runErr != nil {
+			status = RunStatusFailed
+			errMsg = runErr.Error()
+			e.logr.Error("etl: manual run failed", zap.String("job", job.Name), zap.Error(runErr))
+		} else {
+			e.logr.Info("etl: manual run complete",
+				zap.String("job", job.Name),
+				zap.Int64("rows_extracted", result.RowsExtracted),
+				zap.Int64("rows_loaded", result.RowsLoaded))
+		}
+		if err := finishRun(context.Background(), e.db, runID, status, result, errMsg); err != nil {
+			e.logr.Error("etl: failed to record manual run result", zap.Error(err))
+		}
+	}()
+
+	return runID, nil
+}
+
 // nextTriggerTime returns the soonest of times (each "HH:MM", 24h, UTC)
 // that is strictly after now — today's entry if it hasn't passed yet,
 // otherwise tomorrow's.

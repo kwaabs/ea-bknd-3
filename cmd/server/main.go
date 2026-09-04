@@ -47,12 +47,14 @@ func main() {
 		}
 	}
 
-	r, authSvc := routes.NewRouter(db, cfg, logr, c)
-
 	schedulerCtx, stopScheduler := context.WithCancel(context.Background())
 	defer stopScheduler()
+
+	etlEngine := etl.Start(schedulerCtx, db, cfg, logr)
+
+	r, authSvc := routes.NewRouter(db, cfg, logr, c, etlEngine)
+
 	scheduler.StartDailySessionReset(schedulerCtx, authSvc, logr)
-	etl.Start(schedulerCtx, db, cfg, logr)
 
 	server := &http.Server{
 		Addr:         ":" + cfg.Port,

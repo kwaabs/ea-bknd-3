@@ -420,6 +420,56 @@ func (s *Service) ListJobs(ctx context.Context) ([]Job, error) {
 	return jobs, err
 }
 
+// etlOwnTables are this engine's own control tables — never valid picks
+// for a job's destination, since they're not landing tables.
+var etlOwnTables = []string{"etl_sources", "etl_jobs", "etl_job_state", "etl_job_runs"}
+
+// ListDestTables lists the ordinary tables in a schema (default "app", the
+// convention every job so far has used) that a job could load into — the
+// options for the Job form's destination-table picker. Reads
+// information_schema directly (this app database, not an external
+// source), with schema/exclusions bound as query parameters rather than
+// interpolated, same as encryptPassword/decryptPassword's pgcrypto calls.
+func (s *Service) ListDestTables(ctx context.Context, schema string) ([]string, error) {
+	if schema == "" {
+		schema = "app"
+	}
+	var tables []string
+	err := s.db.NewRaw(`
+		SELECT table_name FROM information_schema.tables
+		WHERE table_schema = ? AND table_type = 'BASE TABLE' AND table_name NOT IN (?)
+		ORDER BY table_name
+	`, schema, bun.In(etlOwnTables)).Scan(ctx, &tables)
+	if err != nil {
+		return nil, err
+	}
+	return tables, nil
+}
+
+// ListDestTableColumns lists a candidate destination table's columns, in
+// physical column order — what the Job form's source→destination column
+// mapping step matches source_query's SELECT list against. dest_columns is
+// still stored as a plain array (positional, not this endpoint) once the
+// mapping is done; this is read-only, just for building the picker.
+func (s *Service) ListDestTableColumns(ctx context.Context, schema, table string) ([]DestColumnInfo, error) {
+	if schema == "" {
+		schema = "app"
+	}
+	if strings.TrimSpace(table) == "" {
+		return nil, errors.New("table is required")
+	}
+	var cols []DestColumnInfo
+	err := s.db.NewRaw(`
+		SELECT column_name AS name, data_type AS data_type FROM information_schema.columns
+		WHERE table_schema = ? AND table_name = ?
+		ORDER BY ordinal_position
+	`, schema, table).Scan(ctx, &cols)
+	if err != nil {
+		return nil, err
+	}
+	return cols, nil
+}
+
 func jobFromInput(id string, in JobInput) *Job {
 	return &Job{
 		ID:              id,

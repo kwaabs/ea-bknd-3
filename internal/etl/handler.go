@@ -27,16 +27,16 @@ func NewHandler(svc *Service, logr *zap.Logger) *Handler {
 func (h *Handler) requireNotifyEmail(w http.ResponseWriter, r *http.Request) bool {
 	userID, _ := r.Context().Value(middleware.ContextUserIDKey).(string)
 	if userID == "" {
-		httpx.Error(w, http.StatusUnauthorized, "authentication required")
+		httpx.JSON(w, http.StatusUnauthorized, "authentication required")
 		return false
 	}
 	if _, err := h.service.ResolveNotifyEmail(r.Context(), userID); err != nil {
 		if errors.Is(err, ErrForbidden) {
-			httpx.Error(w, http.StatusForbidden, "you are not allowed to manage the ETL engine")
+			httpx.JSON(w, http.StatusForbidden, "you are not allowed to manage the ETL engine")
 			return false
 		}
 		h.logr.Error("failed to resolve notify email", zap.Error(err), zap.String("user_id", userID))
-		httpx.Error(w, http.StatusInternalServerError, "failed to verify permissions")
+		httpx.JSON(w, http.StatusInternalServerError, "failed to verify permissions")
 		return false
 	}
 	return true
@@ -44,11 +44,11 @@ func (h *Handler) requireNotifyEmail(w http.ResponseWriter, r *http.Request) boo
 
 func writeServiceErr(w http.ResponseWriter, logr *zap.Logger, action string, err error) {
 	if errors.Is(err, ErrNotFound) {
-		httpx.Error(w, http.StatusNotFound, "not found")
+		httpx.JSON(w, http.StatusNotFound, "not found")
 		return
 	}
 	logr.Error(action, zap.Error(err))
-	httpx.Error(w, http.StatusBadRequest, err.Error())
+	httpx.JSON(w, http.StatusBadRequest, err.Error())
 }
 
 // ---------------------------------------------------------------------
@@ -73,7 +73,7 @@ func (h *Handler) CreateSource(w http.ResponseWriter, r *http.Request) {
 	}
 	var in SourceInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid request body")
+		httpx.JSON(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	src, err := h.service.CreateSource(r.Context(), in)
@@ -91,7 +91,7 @@ func (h *Handler) UpdateSource(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var in SourceInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid request body")
+		httpx.JSON(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	src, err := h.service.UpdateSource(r.Context(), id, in)
@@ -156,7 +156,7 @@ func (h *Handler) CreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 	var in JobInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid request body")
+		httpx.JSON(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	job, err := h.service.CreateJob(r.Context(), in)
@@ -174,7 +174,7 @@ func (h *Handler) UpdateJob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var in JobInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid request body")
+		httpx.JSON(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	job, err := h.service.UpdateJob(r.Context(), id, in)
@@ -252,7 +252,7 @@ func (h *Handler) TestQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	var in testQueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid request body")
+		httpx.JSON(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	result, err := h.service.TestQuery(r.Context(), in.SourceID, in.Query)

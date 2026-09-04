@@ -130,12 +130,17 @@ BEGIN
      * inserts cleanly regardless — its meter_number is NULL, and NULL
      * never conflicts with anything under a standard unique constraint.
      *
-     * After the loop, resync_mms_duplicate_flags and
-     * resync_mms_sales_summary (sql/mms_customer_sales_dedup.sql) are
-     * called ONCE for the whole run's date range — not per batch, which
-     * would be far more expensive than necessary — so newly inserted
-     * rows are correctly deduped and reflected in the fast aggregate
-     * path without a separate manual step.
+     * resync_mms_duplicate_flags and resync_mms_sales_summary
+     * (sql/mms_customer_sales_dedup.sql) run once PER BATCH, in the same
+     * transaction as that batch's insert, right before it commits — same
+     * per-batch contract that file already documents for the external
+     * ingestion process. Originally these ran once at the very end of
+     * the whole run instead; a batch partway through failing (e.g. the
+     * uq_meter_time violation this procedure hit before ON CONFLICT DO
+     * NOTHING was added) meant every already-committed batch stayed
+     * permanently un-deduped, since that end-of-run code was never
+     * reached. Per-batch costs a bit more overall but every commit is
+     * always fully resolved on its own.
      * ============================================================
      */
 
@@ -285,6 +290,27 @@ BEGIN
 
         /*
          * ========================================================
+         * RESYNC dedup flags and the daily summary for THIS BATCH's
+         * date range, in the SAME transaction as its insert, right
+         * before COMMIT — see sql/mms_customer_sales_dedup.sql. This
+         * matches that file's own documented per-batch ingestion
+         * contract (raw inserts -> resync_mms_duplicate_flags ->
+         * resync_mms_sales_summary, all before the batch commits), not
+         * once at the end of the whole run: a crash partway through a
+         * long run (e.g. the uq_meter_time violation this procedure hit
+         * before ON CONFLICT DO NOTHING was added) used to leave every
+         * already-committed batch permanently un-deduped, since the
+         * old once-at-the-end resync code was never reached. Per-batch
+         * costs a little more overall but means every commit is always
+         * fully resolved — no batch's data can ever be stuck waiting on
+         * a later batch (or the whole run) to finish successfully.
+         * ========================================================
+         */
+        PERFORM app.resync_mms_duplicate_flags(v_batch_min_dt::date, v_batch_max_dt::date);
+        PERFORM app.resync_mms_sales_summary(v_batch_min_dt::date, v_batch_max_dt::date);
+
+        /*
+         * ========================================================
          * PERSIST THE CHECKPOINT — same transaction as the batch
          * insert above, right before COMMIT, for the same reason as
          * migrate_zeus_sales_from_working_resumable.sql: if this
@@ -310,26 +336,14 @@ BEGIN
 
     END LOOP;
 
-    /*
-     * ========================================================
-     * RESYNC dedup flags and the daily summary ONCE for the whole
-     * run's date range — see sql/mms_customer_sales_dedup.sql. Skipped
-     * entirely if this run inserted nothing (v_run_min_dt still NULL).
-     * ========================================================
-     */
-    IF v_run_min_dt IS NOT NULL THEN
-        RAISE NOTICE 'Resyncing duplicate flags and daily summary for % .. %',
-            v_run_min_dt::date, v_run_max_dt::date;
-        PERFORM app.resync_mms_duplicate_flags(v_run_min_dt::date, v_run_max_dt::date);
-        PERFORM app.resync_mms_sales_summary(v_run_min_dt::date, v_run_max_dt::date);
-        COMMIT;
-    END IF;
-
     RAISE NOTICE '==============================================';
     RAISE NOTICE 'POPULATION COMPLETE';
     RAISE NOTICE '==============================================';
     RAISE NOTICE 'Total processed this run: %', v_total_processed;
     RAISE NOTICE 'Checkpoint cursor: (%, %)', v_last_dt, v_last_meter;
+    IF v_run_min_dt IS NOT NULL THEN
+        RAISE NOTICE 'Date range touched this run: % .. %', v_run_min_dt::date, v_run_max_dt::date;
+    END IF;
     RAISE NOTICE 'Total elapsed: %', clock_timestamp() - v_started_at;
 
 END;

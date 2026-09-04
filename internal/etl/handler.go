@@ -134,6 +134,34 @@ func (h *Handler) TestSourceConnection(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// TestSourceConnectionDraft is TestSourceConnection's counterpart for a
+// source that hasn't been saved yet — the "does this work" check while
+// filling out the Add Source form, before it's ever a row in
+// app.etl_sources.
+func (h *Handler) TestSourceConnectionDraft(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	var in SourceInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		httpx.JSON(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	elapsed, err := h.service.TestConnectionDraft(r.Context(), in)
+	if err != nil {
+		httpx.JSON(w, http.StatusOK, map[string]any{
+			"ok":         false,
+			"error":      err.Error(),
+			"elapsed_ms": elapsed.Milliseconds(),
+		})
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"elapsed_ms": elapsed.Milliseconds(),
+	})
+}
+
 // ---------------------------------------------------------------------
 // Jobs
 // ---------------------------------------------------------------------

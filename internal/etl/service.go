@@ -179,15 +179,40 @@ func (s *Service) DeleteSource(ctx context.Context, id string) error {
 	return nil
 }
 
-// TestConnection opens a connection to a source and pings it — nothing
-// more. Fetches the source fresh (not through Engine's cache) so it always
-// reflects the current row, including one not yet enabled.
+// TestConnection opens a connection to a saved source and pings it —
+// nothing more. Fetches the source fresh (not through Engine's cache) so
+// it always reflects the current row, including one not yet enabled.
 func (s *Service) TestConnection(ctx context.Context, sourceID string) (time.Duration, error) {
 	src := new(Source)
 	if err := s.db.NewSelect().Model(src).Where("id = ?", sourceID).Scan(ctx); err != nil {
 		return 0, ErrNotFound
 	}
-	db, err := openSource(*src)
+	return pingSource(ctx, *src)
+}
+
+// TestConnectionDraft is the same connect-and-ping check as TestConnection,
+// but against connection details that haven't been saved as a source yet —
+// the "does this work" check while filling out the Add Source form, before
+// committing to a row (and before, e.g., double-checking a typo'd
+// password_env_var is even worth setting on the server).
+func (s *Service) TestConnectionDraft(ctx context.Context, in SourceInput) (time.Duration, error) {
+	if err := in.validate(); err != nil {
+		return 0, err
+	}
+	src := Source{
+		Kind:           in.Kind,
+		Host:           in.Host,
+		Port:           in.Port,
+		DatabaseName:   in.DatabaseName,
+		Username:       in.Username,
+		PasswordEnvVar: in.PasswordEnvVar,
+		ExtraParams:    in.ExtraParams,
+	}
+	return pingSource(ctx, src)
+}
+
+func pingSource(ctx context.Context, src Source) (time.Duration, error) {
+	db, err := openSource(src)
 	if err != nil {
 		return 0, err
 	}

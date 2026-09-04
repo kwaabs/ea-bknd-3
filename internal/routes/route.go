@@ -262,6 +262,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 			r.Put("/sources/{id}", etlHandler.UpdateSource)
 			r.Delete("/sources/{id}", etlHandler.DeleteSource)
 			r.Post("/sources/{id}/test-connection", etlHandler.TestSourceConnection)
+			r.Post("/sources/test-connection", etlHandler.TestSourceConnectionDraft)
 
 			r.Get("/jobs", etlHandler.ListJobs)
 			r.Post("/jobs", etlHandler.CreateJob)

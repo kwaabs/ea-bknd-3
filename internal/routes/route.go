@@ -272,6 +272,9 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 			r.Get("/jobs/{id}/runs", etlHandler.ListJobRuns)
 			r.Get("/jobs/{id}/state", etlHandler.GetJobState)
 
+			r.Get("/dest-tables", etlHandler.ListDestTables)
+			r.Get("/dest-tables/{table}/columns", etlHandler.ListDestTableColumns)
+
 			r.Post("/test-query", etlHandler.TestQuery)
 		})
 

@@ -126,3 +126,12 @@ type JobRun struct {
 	RowsLoaded    int64      `bun:"rows_loaded"         json:"rows_loaded"`
 	ErrorMessage  *string    `bun:"error_message"       json:"error_message"`
 }
+
+// DestColumnInfo describes one column of a candidate destination table —
+// read straight from information_schema.columns (see
+// Service.ListDestTableColumns), not a bun model of its own table, so it's
+// just a plain scan target rather than a BaseModel-backed struct.
+type DestColumnInfo struct {
+	Name     string `bun:"name"      json:"name"`
+	DataType string `bun:"data_type" json:"data_type"`
+}

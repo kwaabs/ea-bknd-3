@@ -266,6 +266,38 @@ func (h *Handler) GetJobState(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------
+// Destination table/column discovery — feeds the Job form's destination
+// table picker and its source→destination column mapping step.
+// ---------------------------------------------------------------------
+
+func (h *Handler) ListDestTables(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	schema := r.URL.Query().Get("schema")
+	tables, err := h.service.ListDestTables(r.Context(), schema)
+	if err != nil {
+		writeServiceErr(w, h.logr, "failed to list etl destination tables", err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"data": tables})
+}
+
+func (h *Handler) ListDestTableColumns(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	schema := r.URL.Query().Get("schema")
+	table := chi.URLParam(r, "table")
+	cols, err := h.service.ListDestTableColumns(r.Context(), schema, table)
+	if err != nil {
+		writeServiceErr(w, h.logr, "failed to list etl destination table columns", err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"data": cols})
+}
+
+// ---------------------------------------------------------------------
 // Ad-hoc test query
 // ---------------------------------------------------------------------
 

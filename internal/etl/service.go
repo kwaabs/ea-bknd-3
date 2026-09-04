@@ -27,15 +27,18 @@ var (
 // state — every read/write here otherwise talks to Postgres directly, the
 // same as the Engine's own reload/runJob path, so a change made through
 // this Service is visible to the Engine within one reload cycle without
-// any direct coupling beyond that one call.
+// any direct coupling beyond that one call. credentialsKey is
+// config.ETLCredentialsKey — see crypto.go and
+// sql/etl_sources_password_encryption.sql.
 type Service struct {
-	db           *bun.DB
-	notifyEmails *notifyemail.Service
-	engine       *Engine
+	db             *bun.DB
+	notifyEmails   *notifyemail.Service
+	engine         *Engine
+	credentialsKey string
 }
 
-func NewService(db *bun.DB, notifyEmails *notifyemail.Service, engine *Engine) *Service {
-	return &Service{db: db, notifyEmails: notifyEmails, engine: engine}
+func NewService(db *bun.DB, notifyEmails *notifyemail.Service, engine *Engine, credentialsKey string) *Service {
+	return &Service{db: db, notifyEmails: notifyEmails, engine: engine, credentialsKey: credentialsKey}
 }
 
 // ResolveNotifyEmail mirrors meters.Service.ResolveNotifyEmail exactly —
@@ -62,15 +65,20 @@ func (s *Service) ResolveNotifyEmail(ctx context.Context, userID string) (string
 // ---------------------------------------------------------------------
 
 type SourceInput struct {
-	Name           string            `json:"name"`
-	Kind           SourceKind        `json:"kind"`
-	Host           string            `json:"host"`
-	Port           int               `json:"port"`
-	DatabaseName   string            `json:"database_name"`
-	Username       string            `json:"username"`
-	PasswordEnvVar string            `json:"password_env_var"`
-	ExtraParams    map[string]string `json:"extra_params"`
-	Enabled        bool              `json:"enabled"`
+	Name         string     `json:"name"`
+	Kind         SourceKind `json:"kind"`
+	Host         string     `json:"host"`
+	Port         int        `json:"port"`
+	DatabaseName string     `json:"database_name"`
+	Username     string     `json:"username"`
+	// Password is write-only and optional on update: nil or empty means
+	// "leave the currently-stored password as-is" (the Edit Source form
+	// never receives the plaintext back to prefill, so it always submits
+	// this empty unless the operator is actively rotating it). Required
+	// (non-empty) on create. See UpdateSource/CreateSource.
+	Password    *string           `json:"password"`
+	ExtraParams map[string]string `json:"extra_params"`
+	Enabled     bool              `json:"enabled"`
 }
 
 func (in SourceInput) validate() error {
@@ -94,43 +102,57 @@ func (in SourceInput) validate() error {
 	if strings.TrimSpace(in.Username) == "" {
 		return errors.New("username is required")
 	}
-	if strings.TrimSpace(in.PasswordEnvVar) == "" {
-		return errors.New("password_env_var is required")
-	}
 	return nil
 }
 
 func (s *Service) ListSources(ctx context.Context) ([]Source, error) {
 	var sources []Source
-	err := s.db.NewSelect().Model(&sources).OrderExpr("name ASC").Scan(ctx)
-	return sources, err
+	if err := s.db.NewSelect().Model(&sources).OrderExpr("name ASC").Scan(ctx); err != nil {
+		return nil, err
+	}
+	for i := range sources {
+		sources[i].HasPassword = len(sources[i].PasswordEncrypted) > 0
+	}
+	return sources, nil
 }
 
 func (s *Service) CreateSource(ctx context.Context, in SourceInput) (*Source, error) {
 	if err := in.validate(); err != nil {
 		return nil, err
 	}
+	if in.Password == nil || strings.TrimSpace(*in.Password) == "" {
+		return nil, errors.New("password is required")
+	}
 	if in.ExtraParams == nil {
 		in.ExtraParams = map[string]string{}
 	}
+	encrypted, err := encryptPassword(ctx, s.db, s.credentialsKey, *in.Password)
+	if err != nil {
+		return nil, err
+	}
 	src := &Source{
-		ID:             uuid.New().String(),
-		Name:           in.Name,
-		Kind:           in.Kind,
-		Host:           in.Host,
-		Port:           in.Port,
-		DatabaseName:   in.DatabaseName,
-		Username:       in.Username,
-		PasswordEnvVar: in.PasswordEnvVar,
-		ExtraParams:    in.ExtraParams,
-		Enabled:        in.Enabled,
+		ID:                uuid.New().String(),
+		Name:              in.Name,
+		Kind:              in.Kind,
+		Host:              in.Host,
+		Port:              in.Port,
+		DatabaseName:      in.DatabaseName,
+		Username:          in.Username,
+		PasswordEncrypted: encrypted,
+		ExtraParams:       in.ExtraParams,
+		Enabled:           in.Enabled,
 	}
 	if _, err := s.db.NewInsert().Model(src).Exec(ctx); err != nil {
 		return nil, err
 	}
+	src.HasPassword = true
 	return src, nil
 }
 
+// UpdateSource rotates the stored password only when in.Password is
+// provided (non-empty) — the column simply isn't included in the UPDATE
+// otherwise, so an edit that only changes e.g. enabled/host never touches
+// the existing encrypted password.
 func (s *Service) UpdateSource(ctx context.Context, id string, in SourceInput) (*Source, error) {
 	if err := in.validate(); err != nil {
 		return nil, err
@@ -139,19 +161,28 @@ func (s *Service) UpdateSource(ctx context.Context, id string, in SourceInput) (
 		in.ExtraParams = map[string]string{}
 	}
 	src := &Source{
-		ID:             id,
-		Name:           in.Name,
-		Kind:           in.Kind,
-		Host:           in.Host,
-		Port:           in.Port,
-		DatabaseName:   in.DatabaseName,
-		Username:       in.Username,
-		PasswordEnvVar: in.PasswordEnvVar,
-		ExtraParams:    in.ExtraParams,
-		Enabled:        in.Enabled,
+		ID:           id,
+		Name:         in.Name,
+		Kind:         in.Kind,
+		Host:         in.Host,
+		Port:         in.Port,
+		DatabaseName: in.DatabaseName,
+		Username:     in.Username,
+		ExtraParams:  in.ExtraParams,
+		Enabled:      in.Enabled,
 	}
+	columns := []string{"name", "kind", "host", "port", "database_name", "username", "extra_params", "enabled"}
+	if in.Password != nil && strings.TrimSpace(*in.Password) != "" {
+		encrypted, err := encryptPassword(ctx, s.db, s.credentialsKey, *in.Password)
+		if err != nil {
+			return nil, err
+		}
+		src.PasswordEncrypted = encrypted
+		columns = append(columns, "password_encrypted")
+	}
+
 	res, err := s.db.NewUpdate().Model(src).
-		Column("name", "kind", "host", "port", "database_name", "username", "password_env_var", "extra_params", "enabled").
+		Column(columns...).
 		Set("updated_at = now()").
 		WherePK().
 		Exec(ctx)
@@ -160,6 +191,17 @@ func (s *Service) UpdateSource(ctx context.Context, id string, in SourceInput) (
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, ErrNotFound
+	}
+	if len(src.PasswordEncrypted) == 0 {
+		// Password wasn't part of this update — report the existing
+		// stored state rather than a misleading "no password" from the
+		// zero-value we never fetched.
+		var existing Source
+		if err := s.db.NewSelect().Model(&existing).Column("password_encrypted").Where("id = ?", id).Scan(ctx); err == nil {
+			src.HasPassword = len(existing.PasswordEncrypted) > 0
+		}
+	} else {
+		src.HasPassword = true
 	}
 	return src, nil
 }
@@ -187,32 +229,38 @@ func (s *Service) TestConnection(ctx context.Context, sourceID string) (time.Dur
 	if err := s.db.NewSelect().Model(src).Where("id = ?", sourceID).Scan(ctx); err != nil {
 		return 0, ErrNotFound
 	}
-	return pingSource(ctx, *src)
+	password, err := decryptPassword(ctx, s.db, s.credentialsKey, src.PasswordEncrypted)
+	if err != nil {
+		return 0, err
+	}
+	return pingSource(ctx, *src, password)
 }
 
 // TestConnectionDraft is the same connect-and-ping check as TestConnection,
 // but against connection details that haven't been saved as a source yet —
 // the "does this work" check while filling out the Add Source form, before
-// committing to a row (and before, e.g., double-checking a typo'd
-// password_env_var is even worth setting on the server).
+// committing to a row. The password is used directly (no encrypt/decrypt
+// round trip needed for a check that never touches app.etl_sources).
 func (s *Service) TestConnectionDraft(ctx context.Context, in SourceInput) (time.Duration, error) {
 	if err := in.validate(); err != nil {
 		return 0, err
 	}
-	src := Source{
-		Kind:           in.Kind,
-		Host:           in.Host,
-		Port:           in.Port,
-		DatabaseName:   in.DatabaseName,
-		Username:       in.Username,
-		PasswordEnvVar: in.PasswordEnvVar,
-		ExtraParams:    in.ExtraParams,
+	if in.Password == nil || strings.TrimSpace(*in.Password) == "" {
+		return 0, errors.New("password is required to test a connection")
 	}
-	return pingSource(ctx, src)
+	src := Source{
+		Kind:         in.Kind,
+		Host:         in.Host,
+		Port:         in.Port,
+		DatabaseName: in.DatabaseName,
+		Username:     in.Username,
+		ExtraParams:  in.ExtraParams,
+	}
+	return pingSource(ctx, src, *in.Password)
 }
 
-func pingSource(ctx context.Context, src Source) (time.Duration, error) {
-	db, err := openSource(src)
+func pingSource(ctx context.Context, src Source, password string) (time.Duration, error) {
+	db, err := openSource(src, password)
 	if err != nil {
 		return 0, err
 	}
@@ -502,7 +550,11 @@ func (s *Service) TestQuery(ctx context.Context, sourceID, query string) (*TestQ
 	if err := s.db.NewSelect().Model(src).Where("id = ?", sourceID).Scan(ctx); err != nil {
 		return nil, ErrNotFound
 	}
-	db, err := openSource(*src)
+	password, err := decryptPassword(ctx, s.db, s.credentialsKey, src.PasswordEncrypted)
+	if err != nil {
+		return nil, err
+	}
+	db, err := openSource(*src, password)
 	if err != nil {
 		return nil, err
 	}

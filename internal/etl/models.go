@@ -50,23 +50,30 @@ const (
 	RunStatusFailed  RunStatus = "failed"
 )
 
-// Source is one external database this engine can pull from. Password is
-// deliberately not a field here — see PasswordEnvVar's comment on the SQL
-// side (sql/etl_engine.sql): it's read from the server's own environment
-// at connect time, never stored in this table.
+// Source is one external database this engine can pull from. The password
+// is stored encrypted (pgcrypto PGP symmetric, key in
+// config.ETLCredentialsKey — see sql/etl_sources_password_encryption.sql)
+// rather than plaintext; PasswordEncrypted is deliberately tagged
+// json:"-" so the ciphertext blob never reaches an HTTP response, even
+// though it isn't the plaintext password.
 type Source struct {
 	bun.BaseModel `bun:"table:app.etl_sources,alias:src"`
 
-	ID             string            `bun:"id,pk"`
-	Name           string            `bun:"name"`
-	Kind           SourceKind        `bun:"kind"`
-	Host           string            `bun:"host"`
-	Port           int               `bun:"port"`
-	DatabaseName   string            `bun:"database_name"`
-	Username       string            `bun:"username"`
-	PasswordEnvVar string            `bun:"password_env_var"`
-	ExtraParams    map[string]string `bun:"extra_params,type:jsonb"`
-	Enabled        bool              `bun:"enabled"`
+	ID                string            `bun:"id,pk"                          json:"id"`
+	Name              string            `bun:"name"                           json:"name"`
+	Kind              SourceKind        `bun:"kind"                           json:"kind"`
+	Host              string            `bun:"host"                           json:"host"`
+	Port              int               `bun:"port"                           json:"port"`
+	DatabaseName      string            `bun:"database_name"                  json:"database_name"`
+	Username          string            `bun:"username"                       json:"username"`
+	PasswordEncrypted []byte            `bun:"password_encrypted"             json:"-"`
+	ExtraParams       map[string]string `bun:"extra_params,type:jsonb"        json:"extra_params"`
+	Enabled           bool              `bun:"enabled"                        json:"enabled"`
+
+	// HasPassword is computed after every read (see service.go), never
+	// stored — lets the UI show "password set" / "no password" without
+	// ever exposing PasswordEncrypted itself.
+	HasPassword bool `bun:"-" json:"has_password"`
 }
 
 // Job is one (source query -> destination table) pull on its own schedule.
@@ -76,21 +83,21 @@ type Source struct {
 type Job struct {
 	bun.BaseModel `bun:"table:app.etl_jobs,alias:j"`
 
-	ID              string         `bun:"id,pk"`
-	Name            string         `bun:"name"`
-	SourceID        string         `bun:"source_id"`
-	SourceQuery     string         `bun:"source_query"`
-	DestSchema      string         `bun:"dest_schema"`
-	DestTable       string         `bun:"dest_table"`
-	DestColumns     []string       `bun:"dest_columns,array"`
-	Mode            JobMode        `bun:"mode"`
-	WatermarkColumn *string        `bun:"watermark_column"`
-	WatermarkType   *WatermarkType `bun:"watermark_type"`
-	ConflictColumns []string       `bun:"conflict_columns,array"`
-	TriggerTimes    []string       `bun:"trigger_times,array"`
-	BatchSize       int            `bun:"batch_size"`
-	TimeoutSeconds  int            `bun:"timeout_seconds"`
-	Enabled         bool           `bun:"enabled"`
+	ID              string         `bun:"id,pk"                 json:"id"`
+	Name            string         `bun:"name"                  json:"name"`
+	SourceID        string         `bun:"source_id"             json:"source_id"`
+	SourceQuery     string         `bun:"source_query"          json:"source_query"`
+	DestSchema      string         `bun:"dest_schema"           json:"dest_schema"`
+	DestTable       string         `bun:"dest_table"            json:"dest_table"`
+	DestColumns     []string       `bun:"dest_columns,array"    json:"dest_columns"`
+	Mode            JobMode        `bun:"mode"                  json:"mode"`
+	WatermarkColumn *string        `bun:"watermark_column"      json:"watermark_column"`
+	WatermarkType   *WatermarkType `bun:"watermark_type"        json:"watermark_type"`
+	ConflictColumns []string       `bun:"conflict_columns,array" json:"conflict_columns"`
+	TriggerTimes    []string       `bun:"trigger_times,array"   json:"trigger_times"`
+	BatchSize       int            `bun:"batch_size"            json:"batch_size"`
+	TimeoutSeconds  int            `bun:"timeout_seconds"       json:"timeout_seconds"`
+	Enabled         bool           `bun:"enabled"                json:"enabled"`
 }
 
 // JobState is the incremental watermark for a job — same "persist right
@@ -99,9 +106,9 @@ type Job struct {
 type JobState struct {
 	bun.BaseModel `bun:"table:app.etl_job_state,alias:st"`
 
-	JobID         string    `bun:"job_id,pk"`
-	LastWatermark *string   `bun:"last_watermark"`
-	UpdatedAt     time.Time `bun:"updated_at"`
+	JobID         string    `bun:"job_id,pk"      json:"job_id"`
+	LastWatermark *string   `bun:"last_watermark" json:"last_watermark"`
+	UpdatedAt     time.Time `bun:"updated_at"     json:"updated_at"`
 }
 
 // JobRun is one execution attempt, for observability. Written 'running' at
@@ -110,12 +117,12 @@ type JobState struct {
 type JobRun struct {
 	bun.BaseModel `bun:"table:app.etl_job_runs,alias:run"`
 
-	ID            int64      `bun:"id,pk,autoincrement"`
-	JobID         string     `bun:"job_id"`
-	StartedAt     time.Time  `bun:"started_at"`
-	FinishedAt    *time.Time `bun:"finished_at"`
-	Status        RunStatus  `bun:"status"`
-	RowsExtracted int64      `bun:"rows_extracted"`
-	RowsLoaded    int64      `bun:"rows_loaded"`
-	ErrorMessage  *string    `bun:"error_message"`
+	ID            int64      `bun:"id,pk,autoincrement" json:"id"`
+	JobID         string     `bun:"job_id"              json:"job_id"`
+	StartedAt     time.Time  `bun:"started_at"          json:"started_at"`
+	FinishedAt    *time.Time `bun:"finished_at"         json:"finished_at"`
+	Status        RunStatus  `bun:"status"              json:"status"`
+	RowsExtracted int64      `bun:"rows_extracted"      json:"rows_extracted"`
+	RowsLoaded    int64      `bun:"rows_loaded"         json:"rows_loaded"`
+	ErrorMessage  *string    `bun:"error_message"       json:"error_message"`
 }

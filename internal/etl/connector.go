@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"os"
 	"time"
 
 	// Blank-imported for their database/sql driver registration side effect
@@ -19,14 +18,16 @@ import (
 	"github.com/uptrace/bun/driver/pgdriver"
 )
 
-// openSource opens a *sql.DB for one Source, per its Kind. The returned DB
-// is a real connection pool (not a single connection) — callers should keep
-// it open for reuse across runs of jobs against the same source rather than
-// opening a fresh one per run; see Engine's sourcePool cache in engine.go.
-func openSource(src Source) (*sql.DB, error) {
-	password := os.Getenv(src.PasswordEnvVar)
+// openSource opens a *sql.DB for one Source, per its Kind. password is the
+// already-decrypted plaintext (see crypto.go's decryptPassword and each
+// caller's use of it) — this function has no credential lookup of its own.
+// The returned DB is a real connection pool (not a single connection) —
+// callers should keep it open for reuse across runs of jobs against the
+// same source rather than opening a fresh one per run; see Engine's
+// sourcePool cache in engine.go.
+func openSource(src Source, password string) (*sql.DB, error) {
 	if password == "" {
-		return nil, fmt.Errorf("etl: env var %q (source %q password) is unset or empty", src.PasswordEnvVar, src.Name)
+		return nil, fmt.Errorf("etl: no password provided for source %q", src.Name)
 	}
 
 	switch src.Kind {

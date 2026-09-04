@@ -23,29 +23,35 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto; -- gen_random_uuid()
 
 -- ---------------------------------------------------------------------
 -- app.etl_sources — one row per external database this engine can pull
--- from. The password is deliberately NOT a column here: it's read from
--- an environment variable at connect time (password_env_var names which
--- one), the same convention this codebase already uses for
--- config.LDAPBindPass (env var LDAP_BIND_PASS) — a Postgres row is not
--- where a credential for a DIFFERENT system's database should live.
+-- from. The password is stored encrypted at rest (pgcrypto PGP symmetric,
+-- password_encrypted), not plaintext — the encryption key
+-- (ETL_CREDENTIALS_ENCRYPTION_KEY) is the one credential that still lives
+-- only in the server's environment, same convention this codebase already
+-- uses for config.LDAPBindPass (env var LDAP_BIND_PASS). A source's
+-- password is managed entirely through the ETL admin UI (create/rotate),
+-- not by hand-editing server config — these source system passwords
+-- rotate on a ~30-day policy, and one-env-var-per-source would have meant
+-- an ops ticket + restart every rotation. See
+-- sql/etl_sources_password_encryption.sql for the full history/rationale
+-- (this table used to have a password_env_var column instead).
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS app.etl_sources (
-    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    name             text NOT NULL UNIQUE,
-    kind             text NOT NULL CHECK (kind IN ('oracle', 'mssql', 'postgres')),
-    host             text NOT NULL,
-    port             integer NOT NULL,
+    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name                text NOT NULL UNIQUE,
+    kind                text NOT NULL CHECK (kind IN ('oracle', 'mssql', 'postgres')),
+    host                text NOT NULL,
+    port                integer NOT NULL,
     -- Oracle: service name. MSSQL/Postgres: database name.
-    database_name    text NOT NULL,
-    username         text NOT NULL,
-    password_env_var text NOT NULL,
+    database_name       text NOT NULL,
+    username             text NOT NULL,
+    password_encrypted  bytea,
     -- Driver-specific extras as a flat string map, e.g. {"encrypt":"disable"}
     -- for an MSSQL box without a trusted cert, or {"sslmode":"require"} for
     -- Postgres. Optional; each connector applies only the keys it knows.
-    extra_params     jsonb NOT NULL DEFAULT '{}'::jsonb,
-    enabled          boolean NOT NULL DEFAULT true,
-    created_at       timestamptz NOT NULL DEFAULT now(),
-    updated_at       timestamptz NOT NULL DEFAULT now()
+    extra_params        jsonb NOT NULL DEFAULT '{}'::jsonb,
+    enabled             boolean NOT NULL DEFAULT true,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now()
 );
 
 -- ---------------------------------------------------------------------
@@ -152,11 +158,13 @@ CREATE INDEX IF NOT EXISTS idx_etl_job_runs_job_started
 
 -- ---------------------------------------------------------------------
 -- Example: registering a nightly Oracle pull (adjust before running).
--- The password itself lives in the server's environment as
--- ETL_ORACLE_FINANCE_PASSWORD, never in this table.
+-- In practice, use the ETL admin UI to create a source — it encrypts the
+-- password with ETL_CREDENTIALS_ENCRYPTION_KEY via pgp_sym_encrypt for
+-- you. Shown here only to illustrate the shape:
 -- ---------------------------------------------------------------------
--- INSERT INTO app.etl_sources (name, kind, host, port, database_name, username, password_env_var)
--- VALUES ('oracle_finance', 'oracle', 'oracle.internal', 1521, 'FINPROD', 'etl_reader', 'ETL_ORACLE_FINANCE_PASSWORD');
+-- INSERT INTO app.etl_sources (name, kind, host, port, database_name, username, password_encrypted)
+-- VALUES ('oracle_finance', 'oracle', 'oracle.internal', 1521, 'FINPROD', 'etl_reader',
+--         pgp_sym_encrypt('the-password', 'the-same-key-as-ETL_CREDENTIALS_ENCRYPTION_KEY'));
 --
 -- INSERT INTO app.etl_jobs (name, source_id, source_query, dest_table, dest_columns, mode, watermark_column, watermark_type, trigger_times, batch_size)
 -- SELECT

@@ -39,9 +39,17 @@ type Config struct {
 	// ETL engine (internal/etl) — Oracle/MSSQL/Postgres source pulls on a
 	// nightly schedule. ETLWorkers bounds how many jobs can extract
 	// concurrently; ETLReloadInterval is how often app.etl_sources/
-	// app.etl_jobs are re-read for new/edited rows.
+	// app.etl_jobs are re-read for new/edited rows. ETLCredentialsKey
+	// decrypts/encrypts app.etl_sources.password_encrypted (pgcrypto PGP
+	// symmetric) — the one secret this feature still needs in the process
+	// environment, replacing what used to be one env var PER source
+	// (password_env_var) with one env var total, since source passwords
+	// rotate on a ~30-day policy and per-source env vars meant an ops
+	// ticket + restart every rotation. See
+	// sql/etl_sources_password_encryption.sql for the full rationale.
 	ETLWorkers        int
 	ETLReloadInterval time.Duration
+	ETLCredentialsKey string
 }
 
 // Load loads environment variables and returns a Config struct
@@ -85,6 +93,7 @@ func Load() *Config {
 
 		ETLWorkers:        etlWorkers,
 		ETLReloadInterval: time.Duration(etlReloadSec) * time.Second,
+		ETLCredentialsKey: getEnv("ETL_CREDENTIALS_ENCRYPTION_KEY", ""),
 	}
 }
 

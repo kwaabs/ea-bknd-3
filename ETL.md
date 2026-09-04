@@ -21,24 +21,28 @@ re-reads `app.etl_sources`/`app.etl_jobs` every `ETL_RELOAD_INTERVAL_SECONDS`
 
 1. Apply `sql/etl_engine.sql` against the app database. It creates
    `app.etl_sources`, `app.etl_jobs`, `app.etl_job_state`, `app.etl_job_runs`.
-2. Register a source (credentials are NOT stored in this table — see below):
+   If this database previously had the older `password_env_var`-based
+   schema, also apply `sql/etl_sources_password_encryption.sql`.
+2. Set `ETL_CREDENTIALS_ENCRYPTION_KEY` in the server's environment (`.env`
+   in dev) — a passphrase used to encrypt/decrypt every source's password
+   at rest (pgcrypto PGP symmetric). This is the **one** secret this
+   feature needs in the process environment; see "Source passwords" below
+   for why.
+3. Register a source and a job — either through the ETL admin UI
+   (`/admin/etl` in the frontend: Sources tab, then Jobs tab; both have a
+   Test button before you commit) or directly in SQL, e.g.:
 
    ```sql
-   INSERT INTO app.etl_sources (name, kind, host, port, database_name, username, password_env_var)
-   VALUES ('oracle_finance', 'oracle', 'oracle.internal', 1521, 'FINPROD', 'etl_reader', 'ETL_ORACLE_FINANCE_PASSWORD');
+   INSERT INTO app.etl_sources (name, kind, host, port, database_name, username, password_encrypted)
+   VALUES ('oracle_finance', 'oracle', 'oracle.internal', 1521, 'FINPROD', 'etl_reader',
+           pgp_sym_encrypt('the-password', 'the-same-key-as-ETL_CREDENTIALS_ENCRYPTION_KEY'));
    ```
-
-   Set `ETL_ORACLE_FINANCE_PASSWORD` in the server's environment (`.env` in
-   dev). This mirrors how `LDAP_BIND_PASS` already works in
-   `internal/config/config.go` — a credential for a *different* system's
-   database has no business living as a plaintext column in this app's own
-   Postgres.
 
    `kind` is one of `oracle`, `mssql`, `postgres`. `extra_params` (jsonb) is
    for driver-specific extras, e.g. `{"encrypt":"disable"}` for an MSSQL box
    without a trusted cert.
 
-3. Register a job:
+4. Register a job (admin UI, or SQL):
 
    ```sql
    INSERT INTO app.etl_jobs (name, source_id, source_query, dest_table, dest_columns, mode, watermark_column, watermark_type, trigger_times, batch_size)
@@ -61,9 +65,29 @@ re-reads `app.etl_sources`/`app.etl_jobs` every `ETL_RELOAD_INTERVAL_SECONDS`
    order in `dest_columns` must match `source_query`'s `SELECT` list
    position-for-position; the engine maps by position, not by name.
 
-4. Start (or restart) the server. Within `ETL_RELOAD_INTERVAL_SECONDS` the
+5. Start (or restart) the server. Within `ETL_RELOAD_INTERVAL_SECONDS` the
    new job is picked up and scheduled — no restart needed for jobs added
    *after* that.
+
+## Source passwords
+
+Stored encrypted at rest in `app.etl_sources.password_encrypted`
+(pgcrypto, PGP symmetric / AES-256), under `ETL_CREDENTIALS_ENCRYPTION_KEY`
+— not plaintext, and not the earlier `password_env_var` design (one env
+var per source). The switch was deliberate: these source-system passwords
+rotate on a ~30-day policy, and one-env-var-per-source meant an ops ticket
+plus a server restart every rotation, for every source. An encrypted
+column lets whoever manages a source rotate its password from the Edit
+Source form itself — no server access needed for routine rotation, only
+for the one encryption key, which is set once and rotated rarely (see
+`sql/etl_sources_password_encryption.sql` for the full write-up,
+including how to re-key if `ETL_CREDENTIALS_ENCRYPTION_KEY` itself ever
+needs to change).
+
+The Edit Source form's password field is write-only — it's never
+prefilled with the current password (the API never returns it, only a
+`has_password` boolean), and leaving it blank on an update keeps the
+existing password unchanged.
 
 ## The `{{WATERMARK}}` contract (incremental jobs only)
 
@@ -133,9 +157,6 @@ from the last *committed* batch's watermark, not the crashed one.
 
 ## Current limitations (v1)
 
-- No admin UI — sources/jobs are managed via direct SQL, same as
-  `app.migration_checkpoints` and friends elsewhere in this repo. A natural
-  next step if this grows past a handful of jobs.
 - Binary/blob source columns aren't supported — `[]byte` scanned off a
   source row is always treated as text (see `normalizeValue` in
   `internal/etl/run.go`). Fine for ordinary business data; not fine for a

@@ -1,6 +1,7 @@
 package etl
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +257,86 @@ func TestJobInputValidate_IncrementalRequiresWatermarkInDestColumns(t *testing.T
 	}
 	if err := in.validate(); err == nil {
 		t.Fatal("expected validation error when watermark_column is missing from dest_columns, got none")
+	}
+}
+
+// TestSourceJSONSerialization guards against the bug this had until it was
+// caught by testing the real backend against the real frontend instead of
+// mocked responses: without explicit json tags, encoding/json falls back
+// to Go field names (PascalCase), silently breaking every snake_case
+// field the frontend expects. Also confirms the encrypted password blob
+// never appears in a response, even under its own field name.
+func TestSourceJSONSerialization(t *testing.T) {
+	src := Source{
+		ID:                "src-1",
+		Name:              "oracle_finance",
+		Kind:              KindOracle,
+		Host:              "oracle.internal",
+		Port:              1521,
+		DatabaseName:      "FINPROD",
+		Username:          "etl_reader",
+		PasswordEncrypted: []byte("super-secret-ciphertext"),
+		ExtraParams:       map[string]string{},
+		Enabled:           true,
+		HasPassword:       true,
+	}
+	b, err := json.Marshal(src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body := string(b)
+
+	for _, key := range []string{
+		`"id"`, `"name"`, `"kind"`, `"host"`, `"port"`,
+		`"database_name"`, `"username"`, `"extra_params"`, `"enabled"`, `"has_password"`,
+	} {
+		if !strings.Contains(body, key) {
+			t.Errorf("Source JSON missing expected snake_case key %s: %s", key, body)
+		}
+	}
+	if strings.Contains(body, "PasswordEncrypted") || strings.Contains(body, "password_encrypted") {
+		t.Errorf("Source JSON must never expose the encrypted password field: %s", body)
+	}
+	if strings.Contains(body, "super-secret-ciphertext") {
+		t.Errorf("Source JSON must never expose ciphertext: %s", body)
+	}
+}
+
+func TestJobJSONSerialization(t *testing.T) {
+	job := Job{
+		ID:           "job-1",
+		Name:         "oracle_finance_invoices",
+		SourceID:     "src-1",
+		SourceQuery:  "SELECT 1",
+		DestSchema:   "app",
+		DestTable:    "raw_oracle_invoices",
+		DestColumns:  []string{"id"},
+		Mode:         ModeFullRefresh,
+		TriggerTimes: []string{"01:00"},
+		BatchSize:    5000,
+	}
+	b, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	body := string(b)
+	for _, key := range []string{`"id"`, `"name"`, `"source_id"`, `"source_query"`, `"dest_schema"`, `"dest_table"`, `"dest_columns"`, `"mode"`, `"trigger_times"`, `"batch_size"`} {
+		if !strings.Contains(body, key) {
+			t.Errorf("Job JSON missing expected snake_case key %s: %s", key, body)
+		}
+	}
+}
+
+func TestSourceInputValidate_NoLongerRequiresPassword(t *testing.T) {
+	// validate() itself doesn't check Password — that's enforced
+	// separately by CreateSource (required) vs UpdateSource (optional,
+	// omitted = keep existing), see service.go.
+	in := SourceInput{
+		Name: "s", Kind: KindPostgres, Host: "h", Port: 5432,
+		DatabaseName: "d", Username: "u",
+	}
+	if err := in.validate(); err != nil {
+		t.Errorf("validate() should not require a password, got error: %v", err)
 	}
 }
 

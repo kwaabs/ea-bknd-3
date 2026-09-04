@@ -82,7 +82,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 	notifyEmailSvc := notifyemail.NewService(db)
 	meterHandler := meters.NewHandler(meters.NewService(db, notifyEmailSvc), logr.Logger)
 	meterMetricsHandler := handlers.NewMeterMetricsHandler(meterMetricsSvc, logr.Logger)
-	etlHandler := etl.NewHandler(etl.NewService(db, notifyEmailSvc, etlEngine), logr.Logger)
+	etlHandler := etl.NewHandler(etl.NewService(db, notifyEmailSvc, etlEngine, cfg.ETLCredentialsKey), logr.Logger)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

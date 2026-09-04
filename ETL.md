@@ -115,6 +115,33 @@ Two requirements on an incremental job's `source_query`:
   the watermark back off the *destination* column by name after loading,
   not the source query's own column naming.
 
+## The `{{FILTER}}` contract — pulling only rows matching keys from this app database
+
+A job's `source_query` only ever talks to its one registered external
+source — it has no way to join live against `app.meters` or any other
+table in this app's own database, since those live in a completely
+different connection. `filter_query` bridges that gap without a live
+cross-database join:
+
+- `filter_query` is a plain `SELECT` run against **this app database**
+  (not the external source) before every run. It must return exactly one
+  column — e.g. `SELECT meter_number FROM app.meters WHERE status =
+  'active'`.
+- Its results are chunked into `filter_batch_size`-sized groups (default
+  1000), and `source_query` is run once per chunk with the literal token
+  `{{FILTER}}` substituted for that chunk's values as a SQL `IN (...)`
+  list — e.g. `source_query` of `SELECT meter_number, reading_value FROM
+  meter_readings WHERE meter_number IN ({{FILTER}})`.
+- Only valid for `mode = "full_refresh"`. Filter chunks are independent,
+  arbitrarily-ordered result sets with no relative ordering between them,
+  so there's no sound single "furthest watermark reached" answer across
+  all of them the way there is for one continuous, ORDER-BY'd result
+  set — rather than get that subtly wrong, incremental + filtered jobs
+  are rejected at save time.
+- `source_query` must reference `{{FILTER}}` whenever `filter_query` is
+  set, and must not reference it otherwise — same "don't silently ignore
+  a token" discipline as `{{WATERMARK}}`.
+
 ## Upserts vs. plain append
 
 Set `conflict_columns` (text[]) on a job to get

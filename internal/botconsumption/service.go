@@ -181,9 +181,40 @@ func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterPara
 	return p, false, nil
 }
 
+// detailSortColumn maps a whitelisted sortBy key (matching the frontend
+// table's own sort fields) to the column Detail's ORDER BY uses. Anything
+// not in the whitelist returns ok=false so the caller falls back to the
+// stable default order — same "reject via a switch, never interpolate
+// caller input into SQL" shape as groupExpr above.
+func detailSortColumn(sortBy string) (column string, ok bool) {
+	switch sortBy {
+	case "customer_name":
+		return "customer_name", true
+	case "kwh":
+		return "kwh", true
+	case "bill_month":
+		return "billmonth", true
+	default:
+		return "", false
+	}
+}
+
 // Detail returns a page of matching rows. The select and its count run
 // concurrently inside dbx.Paginate.
-func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Pagination) (*dbx.Page[Reading], error) {
+//
+// sortBy/sortOrder drive the ORDER BY — this is what makes "Page 2" mean
+// anything once results are paginated server-side rather than fetched in
+// one shot and re-sorted in the browser: the frontend used to fetch up to
+// 2000 rows in a single request, silently get clamped to this endpoint's
+// 500-row-per-request cap, and then sort/paginate/search that half-empty
+// window entirely client-side — meaning any table with more real matches
+// than the cap (bot_consumption regularly has tens of thousands for a
+// single month) silently only ever showed its first 500 rows, in
+// whatever order the query happened to return them, with no way to reach
+// the rest. Real pagination needs a real, server-side ORDER BY so "sorted
+// by highest kWh, page 3" is well-defined across the whole table, not
+// just whatever happened to be included the same request.
+func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Pagination, sortBy, sortOrder string) (*dbx.Page[Reading], error) {
 	p, noMatch, err := s.resolveDateRangeToBillMonths(ctx, p)
 	if err != nil {
 		return nil, err
@@ -195,8 +226,21 @@ func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Paginatio
 	}
 	q := s.base(p).
 		ColumnExpr("customer_name, meternumber, geo_code, kwh, tarrif, billmonth, district").
-		ColumnExpr("trim(region) AS region").
-		OrderExpr("region, district, customer_name, meternumber") // stable sort
+		ColumnExpr("trim(region) AS region")
+
+	if col, ok := detailSortColumn(sortBy); ok {
+		dir := "ASC"
+		if strings.ToLower(sortOrder) == "desc" {
+			dir = "DESC"
+		}
+		// Tie-break on customer_name/meternumber so rows with an equal
+		// sort value (e.g. many customers at kwh = 0) still land in a
+		// consistent order across pages instead of shuffling between
+		// requests.
+		q = q.OrderExpr(col + " " + dir + ", customer_name, meternumber")
+	} else {
+		q = q.OrderExpr("region, district, customer_name, meternumber") // stable default sort
+	}
 	return dbx.Paginate[Reading](ctx, q, pg)
 }
 

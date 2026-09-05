@@ -52,7 +52,7 @@ func (h *Handler) Detail(w http.ResponseWriter, r *http.Request) {
 	}
 	pg := httpx.ParsePagination(q, 50, 500)
 
-	result, err := h.svc.Detail(r.Context(), params, pg)
+	result, err := h.svc.Detail(r.Context(), params, pg, q.Get("sortBy"), q.Get("sortOrder"))
 	if err != nil {
 		h.log.Error("bot consumption detail failed", zap.Error(err))
 		httpx.Error(w, http.StatusInternalServerError, "internal error")

@@ -138,9 +138,32 @@ func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterPara
 	return p, false, nil
 }
 
+// detailSortColumn maps a whitelisted sortBy key (matching the frontend
+// table's own sort fields) to the column Detail's ORDER BY uses. Anything
+// not in the whitelist returns ok=false so the caller falls back to the
+// stable default order.
+func detailSortColumn(sortBy string) (column string, ok bool) {
+	switch sortBy {
+	case "customer_name":
+		return "customer_name", true
+	case "kwh":
+		return "kwh", true
+	case "bill_month":
+		return "billmonth", true
+	default:
+		return "", false
+	}
+}
+
 // Detail returns a page of matching rows. The select and its count run
 // concurrently inside dbx.Paginate.
-func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Pagination) (*dbx.Page[Reading], error) {
+//
+// sortBy/sortOrder drive the ORDER BY — see botconsumption's Detail for why
+// this matters: without a real server-side ORDER BY, "sorted by X, page N"
+// isn't well-defined once results are paginated, and a client fetching a
+// large limit once instead of real pages silently loses everything past
+// this endpoint's own per-request cap.
+func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Pagination, sortBy, sortOrder string) (*dbx.Page[Reading], error) {
 	p, noMatch, err := s.resolveDateRangeToBillMonths(ctx, p)
 	if err != nil {
 		return nil, err
@@ -151,8 +174,17 @@ func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Paginatio
 		}, nil
 	}
 	q := s.base(p).
-		ColumnExpr("customer_name, meternumber, geo_code, kwh, tarrif, billmonth, district, region").
-		OrderExpr("region, district, customer_name, meternumber") // stable sort
+		ColumnExpr("customer_name, meternumber, geo_code, kwh, tarrif, billmonth, district, region")
+
+	if col, ok := detailSortColumn(sortBy); ok {
+		dir := "ASC"
+		if strings.ToLower(sortOrder) == "desc" {
+			dir = "DESC"
+		}
+		q = q.OrderExpr(col + " " + dir + ", customer_name, meternumber")
+	} else {
+		q = q.OrderExpr("region, district, customer_name, meternumber") // stable default sort
+	}
 	return dbx.Paginate[Reading](ctx, q, pg)
 }
 

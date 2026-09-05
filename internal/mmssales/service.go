@@ -83,13 +83,53 @@ func (s *Service) summaryBase(p FilterParams) *bun.SelectQuery {
 	return q
 }
 
+// detailSortColumn maps a whitelisted sortBy key (matching the frontend
+// table's own sort fields) to the column Detail's ORDER BY uses. Anything
+// not in the whitelist returns ok=false so the caller falls back to the
+// stable default order — never interpolate caller input into SQL directly.
+func detailSortColumn(sortBy string) (column string, ok bool) {
+	switch sortBy {
+	case "customer_name":
+		return "customer_name", true
+	case "sts_last_month_kwh_read":
+		return "sts_last_month_kwh_read", true
+	case "sts_last_month_credit_read":
+		return "sts_last_month_credit_read", true
+	case "sts_credit_balance_remaining":
+		return "sts_credit_balance_remaining", true
+	case "date_time":
+		return "date_time", true
+	default:
+		return "", false
+	}
+}
+
 // Detail returns a page of matching raw rows. The select and its count run
 // concurrently inside dbx.Paginate.
-func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Pagination) (*dbx.Page[Sale], error) {
+//
+// sortBy/sortOrder drive the ORDER BY — without this, a client fetching a
+// large limit once and sorting/paginating the fetched slice client-side
+// silently loses everything past this endpoint's own per-request cap, the
+// same bug already fixed on botconsumption's equivalent Detail (see that
+// package's comment for the full story). Real pagination needs a real,
+// server-side ORDER BY so "sorted by X, page N" is well-defined across the
+// whole table, not just whatever page happened to be fetched.
+func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Pagination, sortBy, sortOrder string) (*dbx.Page[Sale], error) {
 	q := s.base(p).
 		ColumnExpr("*").
-		ColumnExpr("'MMS Sales' AS data_src").
-		OrderExpr("region, district, customer_name, account_number") // stable sort
+		ColumnExpr("'MMS Sales' AS data_src")
+
+	if col, ok := detailSortColumn(sortBy); ok {
+		dir := "ASC"
+		if strings.ToLower(sortOrder) == "desc" {
+			dir = "DESC"
+		}
+		// Tie-break on customer_name/account_number so rows with an equal
+		// sort value still land in a consistent order across pages.
+		q = q.OrderExpr(col + " " + dir + ", customer_name, account_number")
+	} else {
+		q = q.OrderExpr("region, district, customer_name, account_number") // stable default sort
+	}
 	return dbx.Paginate[Sale](ctx, q, pg)
 }
 

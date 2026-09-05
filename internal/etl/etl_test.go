@@ -209,6 +209,12 @@ func TestIsReadOnlyQuery(t *testing.T) {
 		"WITH x AS (SELECT 1) SELECT * FROM x",
 		"SELECT COUNT(*) FROM invoices",
 		"SELECT COUNT(DISTINCT customer_id) FROM invoices;",
+		// REPLACE(...) is an ordinary read-only string function in
+		// Oracle/MSSQL/Postgres (all three supported source kinds), not a
+		// mutating statement — only MySQL, which this engine doesn't
+		// support, has a mutating "REPLACE INTO ...". A real report query
+		// using it like this was a false positive until fixed.
+		"SELECT SUBSTR(REPLACE(mb.geo_code, '-'), 1, 4) AS district FROM meters mb",
 	}
 	for _, q := range valid {
 		if err := isReadOnlyQuery(q); err != nil {

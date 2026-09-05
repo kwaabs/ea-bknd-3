@@ -418,7 +418,14 @@ func (in JobInput) validate() error {
 	return nil
 }
 
-var disallowedSQLKeyword = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|GRANT|REVOKE|EXEC|EXECUTE|CALL|MERGE|REPLACE|VACUUM)\b`)
+// REPLACE is deliberately not in this list: it's a mutating top-level
+// statement only in MySQL (REPLACE INTO), a dialect this engine doesn't
+// support (see SourceKind) — for the three it does (Oracle, MSSQL,
+// Postgres), REPLACE is only ever the ordinary read-only string function
+// REPLACE(string, search, replacement), which shows up constantly in
+// real reporting queries and would otherwise be flagged as a false
+// positive.
+var disallowedSQLKeyword = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|CREATE|GRANT|REVOKE|EXEC|EXECUTE|CALL|MERGE|VACUUM)\b`)
 
 // isReadOnlyQuery is a best-effort guard, not a SQL parser: it rejects
 // anything that isn't a single SELECT/WITH statement and any of a

@@ -299,6 +299,22 @@ type JobInput struct {
 	FilterBatchSize *int           `json:"filter_batch_size"`
 }
 
+// stripTrailingSemicolon removes one optional trailing ";" (and any
+// whitespace around it) from a query before it's ever sent to a real
+// database connection. SQL*Plus/SQL Developer/DBeaver etc. treat a
+// trailing ";" as their own client-side statement terminator and strip
+// it themselves before executing — but the actual Oracle network
+// protocol (what this engine's go-ora driver speaks) does not, and a
+// query copy-pasted straight from one of those tools, semicolon and
+// all, fails with the flatly unhelpful "ORA-00911: invalid character"
+// pointing at (or right after) the semicolon. isReadOnlyQuery already
+// tolerates exactly one trailing semicolon for validation purposes (see
+// its own TrimRight) — this is what actually removes it before
+// anything runs.
+func stripTrailingSemicolon(q string) string {
+	return strings.TrimRight(strings.TrimSpace(q), "; \t\n\r")
+}
+
 func (in *JobInput) applyDefaults() {
 	if in.DestSchema == "" {
 		in.DestSchema = "app"
@@ -309,7 +325,10 @@ func (in *JobInput) applyDefaults() {
 	if in.TimeoutSeconds <= 0 {
 		in.TimeoutSeconds = 3600
 	}
+	in.SourceQuery = stripTrailingSemicolon(in.SourceQuery)
 	if in.FilterQuery != nil && strings.TrimSpace(*in.FilterQuery) != "" {
+		trimmed := stripTrailingSemicolon(*in.FilterQuery)
+		in.FilterQuery = &trimmed
 		if in.FilterBatchSize == nil || *in.FilterBatchSize <= 0 {
 			defaultBatch := defaultFilterBatchSize
 			in.FilterBatchSize = &defaultBatch
@@ -637,6 +656,11 @@ func (s *Service) TestQuery(ctx context.Context, sourceID, query string) (*TestQ
 	if err := isReadOnlyQuery(query); err != nil {
 		return nil, err
 	}
+	// See stripTrailingSemicolon's comment — a query pasted straight from
+	// SQL*Plus/SQL Developer/DBeaver often still has its trailing ";",
+	// which those tools strip themselves but this engine's Oracle driver
+	// does not accept.
+	query = stripTrailingSemicolon(query)
 
 	src := new(Source)
 	if err := s.db.NewSelect().Model(src).Where("id = ?", sourceID).Scan(ctx); err != nil {

@@ -271,6 +271,51 @@ func TestJobInputValidate_IncrementalRequiresWatermarkInDestColumns(t *testing.T
 	}
 }
 
+func TestStripTrailingSemicolon(t *testing.T) {
+	cases := map[string]string{
+		"SELECT 1;":             "SELECT 1",
+		"SELECT 1 ;":            "SELECT 1",
+		"SELECT 1;\n":           "SELECT 1",
+		"SELECT 1;  \t\n":       "SELECT 1",
+		"SELECT 1":              "SELECT 1",
+		"  SELECT 1  ":          "SELECT 1",
+		"SELECT ';' FROM dual;": "SELECT ';' FROM dual",
+	}
+	for in, want := range cases {
+		if got := stripTrailingSemicolon(in); got != want {
+			t.Errorf("stripTrailingSemicolon(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestJobInputValidate_StripsTrailingSemicolonFromQueries guards the exact
+// bug reported: a query copy-pasted from SQL*Plus/SQL Developer with its
+// trailing ";" still attached fails against Oracle with
+// "ORA-00911: invalid character" once actually executed, because that
+// character is never valid over the wire protocol (only SQL*Plus/IDEs
+// strip it client-side). applyDefaults must remove it before the query is
+// ever stored/run.
+func TestJobInputValidate_StripsTrailingSemicolonFromQueries(t *testing.T) {
+	filterQ := "SELECT meter_number FROM app.meters;"
+	in := JobInput{
+		Name:        "job",
+		SourceID:    "some-source",
+		SourceQuery: "SELECT id FROM t WHERE id IN ({{FILTER}});",
+		DestSchema:  "app",
+		DestTable:   "raw_t",
+		DestColumns: []string{"id"},
+		Mode:        ModeFullRefresh,
+		FilterQuery: &filterQ,
+	}
+	in.applyDefaults()
+	if in.SourceQuery != "SELECT id FROM t WHERE id IN ({{FILTER}})" {
+		t.Errorf("source_query still has a trailing semicolon: %q", in.SourceQuery)
+	}
+	if in.FilterQuery == nil || *in.FilterQuery != "SELECT meter_number FROM app.meters" {
+		t.Errorf("filter_query still has a trailing semicolon: %v", in.FilterQuery)
+	}
+}
+
 func TestJobInputValidate_EmptyTriggerTimesIsValid(t *testing.T) {
 	in := JobInput{
 		Name:         "manual-only-job",

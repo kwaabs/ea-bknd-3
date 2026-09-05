@@ -209,6 +209,12 @@ func TestIsReadOnlyQuery(t *testing.T) {
 		"WITH x AS (SELECT 1) SELECT * FROM x",
 		"SELECT COUNT(*) FROM invoices",
 		"SELECT COUNT(DISTINCT customer_id) FROM invoices;",
+		// REPLACE(...) is an ordinary read-only string function in
+		// Oracle/MSSQL/Postgres (all three supported source kinds), not a
+		// mutating statement — only MySQL, which this engine doesn't
+		// support, has a mutating "REPLACE INTO ...". A real report query
+		// using it like this was a false positive until fixed.
+		"SELECT SUBSTR(REPLACE(mb.geo_code, '-'), 1, 4) AS district FROM meters mb",
 	}
 	for _, q := range valid {
 		if err := isReadOnlyQuery(q); err != nil {
@@ -262,6 +268,36 @@ func TestJobInputValidate_IncrementalRequiresWatermarkInDestColumns(t *testing.T
 	}
 	if err := in.validate(); err == nil {
 		t.Fatal("expected validation error when watermark_column is missing from dest_columns, got none")
+	}
+}
+
+func TestJobInputValidate_EmptyTriggerTimesIsValid(t *testing.T) {
+	in := JobInput{
+		Name:         "manual-only-job",
+		SourceID:     "some-source",
+		SourceQuery:  "SELECT id FROM t",
+		DestSchema:   "app",
+		DestTable:    "raw_t",
+		DestColumns:  []string{"id"},
+		Mode:         ModeFullRefresh,
+		TriggerTimes: nil, // no automatic schedule -- run via "Run now" only
+	}
+	if err := in.validate(); err != nil {
+		t.Fatalf("expected a job with no trigger_times to be valid (manual-only), got: %v", err)
+	}
+}
+
+func TestJobInputValidate_MalformedTriggerTimeStillRejected(t *testing.T) {
+	in := JobInput{
+		Name:         "job",
+		SourceID:     "some-source",
+		SourceQuery:  "SELECT id FROM t",
+		DestColumns:  []string{"id"},
+		Mode:         ModeFullRefresh,
+		TriggerTimes: []string{"25:99"},
+	}
+	if err := in.validate(); err == nil {
+		t.Fatal("expected validation error for a malformed trigger time, got none")
 	}
 }
 

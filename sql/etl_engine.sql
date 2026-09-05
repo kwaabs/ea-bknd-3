@@ -83,10 +83,9 @@ CREATE TABLE IF NOT EXISTS app.etl_sources (
 -- function body is not syntactically a "subquery in the CHECK
 -- expression" as far as the constraint is concerned — the CHECK is just
 -- a function call) and CHECK that function's result instead. Empty-array
--- input is treated as vacuously valid here on purpose — enforcing
--- "non-empty" is etl_jobs_trigger_times_nonempty's job alone, so the two
--- constraints don't both fire (with different reasons) for the same
--- empty-array row.
+-- input is treated as vacuously valid here on purpose — an empty
+-- trigger_times means "no automatic schedule, manual-only job" (see
+-- trigger_times's own comment below), a valid state, not a malformed one.
 CREATE OR REPLACE FUNCTION app.etl_valid_trigger_times(times text[])
 RETURNS boolean
 LANGUAGE sql
@@ -142,6 +141,12 @@ CREATE TABLE IF NOT EXISTS app.etl_jobs (
     -- as text (not a native time[]) so the Go side parses/validates it
     -- directly with time.Parse("15:04", ...) rather than depending on how
     -- the driver maps Postgres's TIME type.
+    --
+    -- Empty ({}), not NULL, means this job has no automatic schedule at
+    -- all — a one-off/ad-hoc pull, only ever run via the admin UI's "Run
+    -- now" (Engine.TriggerNow, which doesn't consult trigger_times at
+    -- all). Engine.scheduleJob treats an empty list as "nothing to
+    -- schedule" and logs that once at Info, not as a configuration error.
     trigger_times    text[] NOT NULL,
     batch_size       integer NOT NULL DEFAULT 5000,
     -- Per-run timeout; guards against a stuck source connection wedging a
@@ -152,13 +157,13 @@ CREATE TABLE IF NOT EXISTS app.etl_jobs (
     updated_at       timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT etl_jobs_watermark_required_for_incremental
         CHECK (mode = 'full_refresh' OR (watermark_column IS NOT NULL AND watermark_type IS NOT NULL)),
-    -- cardinality(), not array_length() — array_length() returns NULL
-    -- (not 0) for an empty array, and a CHECK only rejects an explicit
-    -- FALSE, never NULL, so `array_length(trigger_times, 1) > 0` would
-    -- silently let an empty array through (confirmed against a live
-    -- Postgres 16 while writing this). cardinality() returns a real 0 for
-    -- an empty array, so this actually rejects it.
-    CONSTRAINT etl_jobs_trigger_times_nonempty CHECK (cardinality(trigger_times) > 0),
+    -- No "trigger_times must be non-empty" constraint (removed — see
+    -- sql/etl_jobs_optional_trigger_times.sql for the history/rationale):
+    -- an empty array is a deliberate, valid "manual-only, no automatic
+    -- schedule" job, not a malformed one. Format is still checked for
+    -- whatever entries ARE present — etl_valid_trigger_times treats an
+    -- empty array as vacuously valid on purpose, so the two constraints
+    -- never both fire for the same empty-array row.
     CONSTRAINT etl_jobs_trigger_times_format CHECK (app.etl_valid_trigger_times(trigger_times)),
     CONSTRAINT etl_jobs_filter_requires_full_refresh
         CHECK (filter_query IS NULL OR mode = 'full_refresh'),

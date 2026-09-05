@@ -248,7 +248,7 @@ func TestJobInputValidate_RejectsNonSelectSourceQuery(t *testing.T) {
 		Mode:         ModeFullRefresh,
 		TriggerTimes: []string{"01:00"},
 	}
-	if err := in.validate(); err == nil {
+	if err := in.validate(KindPostgres); err == nil {
 		t.Fatal("expected validation error for a non-SELECT source_query, got none")
 	}
 }
@@ -266,7 +266,7 @@ func TestJobInputValidate_IncrementalRequiresWatermarkInDestColumns(t *testing.T
 		WatermarkType:   &wt,
 		TriggerTimes:    []string{"01:00"},
 	}
-	if err := in.validate(); err == nil {
+	if err := in.validate(KindPostgres); err == nil {
 		t.Fatal("expected validation error when watermark_column is missing from dest_columns, got none")
 	}
 }
@@ -327,7 +327,7 @@ func TestJobInputValidate_EmptyTriggerTimesIsValid(t *testing.T) {
 		Mode:         ModeFullRefresh,
 		TriggerTimes: nil, // no automatic schedule -- run via "Run now" only
 	}
-	if err := in.validate(); err != nil {
+	if err := in.validate(KindPostgres); err != nil {
 		t.Fatalf("expected a job with no trigger_times to be valid (manual-only), got: %v", err)
 	}
 }
@@ -341,7 +341,7 @@ func TestJobInputValidate_MalformedTriggerTimeStillRejected(t *testing.T) {
 		Mode:         ModeFullRefresh,
 		TriggerTimes: []string{"25:99"},
 	}
-	if err := in.validate(); err == nil {
+	if err := in.validate(KindPostgres); err == nil {
 		t.Fatal("expected validation error for a malformed trigger time, got none")
 	}
 }
@@ -389,7 +389,7 @@ func TestJobInputValidate_FilterQueryRequiresFullRefresh(t *testing.T) {
 		TriggerTimes:    []string{"01:00"},
 		FilterQuery:     &filterQ,
 	}
-	if err := in.validate(); err == nil {
+	if err := in.validate(KindPostgres); err == nil {
 		t.Fatal("expected validation error for filter_query combined with incremental mode, got none")
 	}
 }
@@ -405,7 +405,7 @@ func TestJobInputValidate_FilterQueryRequiresTokenInSourceQuery(t *testing.T) {
 		TriggerTimes: []string{"01:00"},
 		FilterQuery:  &filterQ,
 	}
-	if err := in.validate(); err == nil {
+	if err := in.validate(KindPostgres); err == nil {
 		t.Fatal("expected validation error when source_query doesn't reference {{FILTER}}, got none")
 	}
 }
@@ -419,7 +419,7 @@ func TestJobInputValidate_FilterTokenRequiresFilterQuery(t *testing.T) {
 		Mode:         ModeFullRefresh,
 		TriggerTimes: []string{"01:00"},
 	}
-	if err := in.validate(); err == nil {
+	if err := in.validate(KindPostgres); err == nil {
 		t.Fatal("expected validation error when {{FILTER}} is referenced but filter_query is unset, got none")
 	}
 }
@@ -435,7 +435,7 @@ func TestJobInputValidate_FilterQueryMustBeReadOnly(t *testing.T) {
 		TriggerTimes: []string{"01:00"},
 		FilterQuery:  &filterQ,
 	}
-	if err := in.validate(); err == nil {
+	if err := in.validate(KindPostgres); err == nil {
 		t.Fatal("expected validation error for a non-SELECT filter_query, got none")
 	}
 }

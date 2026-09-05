@@ -25,6 +25,12 @@ const (
 	KindOracle   SourceKind = "oracle"
 	KindMSSQL    SourceKind = "mssql"
 	KindPostgres SourceKind = "postgres"
+	// KindHTTPAPI pulls paginated JSON out of an HTTP API instead of a SQL
+	// database — see httpsource.go. Reuses Source's Host/Username/
+	// PasswordEncrypted fields as base URL / api-id / api-key respectively
+	// (see sql/etl_http_api_sources.sql's comment); Port/DatabaseName are
+	// unused for this kind.
+	KindHTTPAPI SourceKind = "http_api"
 )
 
 type JobMode string
@@ -110,6 +116,27 @@ type Job struct {
 	// (see extractAndLoadFiltered's comment for why).
 	FilterQuery     *string `bun:"filter_query"      json:"filter_query"`
 	FilterBatchSize *int    `bun:"filter_batch_size" json:"filter_batch_size"`
+
+	// SourceFields, RecordsPath, PageSize are only meaningful when this
+	// job's source is Kind == KindHTTPAPI — see httpsource.go.
+	//
+	// SourceFields is the http_api analog of "the order source_query's
+	// SELECT list returns columns in" for a SQL job: a JSON object has no
+	// reliable field order of its own, so unlike the SQL kinds (where
+	// dest_columns[i] implicitly names column i of the SELECT list),
+	// http_api jobs must say explicitly which JSON field (dot-path, e.g.
+	// "region.name" for a nested field) fills dest_columns[i]. Always the
+	// same length as DestColumns.
+	SourceFields []string `bun:"source_fields,array" json:"source_fields"`
+	// RecordsPath is the dot-path to the JSON array of records within each
+	// page's response body, e.g. "rows" or "data.items". Defaults to
+	// "data" (see applyDefaults) if left blank.
+	RecordsPath string `bun:"records_path" json:"records_path"`
+	// PageSize is the "limit" value requested per HTTP page — a page
+	// shorter than this ends pagination. Independent of BatchSize, which
+	// governs how many extracted rows accumulate before one INSERT into
+	// the destination.
+	PageSize int `bun:"page_size" json:"page_size"`
 }
 
 // JobState is the incremental watermark for a job — same "persist right

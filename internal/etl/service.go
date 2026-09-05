@@ -4,8 +4,11 @@ import (
 	"bknd-3/internal/models"
 	"bknd-3/internal/notifyemail"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -87,9 +90,25 @@ func (in SourceInput) validate() error {
 	}
 	switch in.Kind {
 	case KindOracle, KindMSSQL, KindPostgres:
+	case KindHTTPAPI:
 	default:
-		return fmt.Errorf("kind must be one of %q, %q, %q", KindOracle, KindMSSQL, KindPostgres)
+		return fmt.Errorf("kind must be one of %q, %q, %q, %q", KindOracle, KindMSSQL, KindPostgres, KindHTTPAPI)
 	}
+
+	// http_api reuses Host/Username/Password as base URL/api-id/api-key
+	// (see sql/etl_http_api_sources.sql) — Port/DatabaseName are
+	// meaningless for it and not required.
+	if in.Kind == KindHTTPAPI {
+		u, err := url.Parse(strings.TrimSpace(in.Host))
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return errors.New("host must be a full base URL, e.g. https://api.example.com")
+		}
+		if strings.TrimSpace(in.Username) == "" {
+			return errors.New("username (the API's api-id) is required")
+		}
+		return nil
+	}
+
 	if strings.TrimSpace(in.Host) == "" {
 		return errors.New("host is required")
 	}
@@ -259,18 +278,47 @@ func (s *Service) TestConnectionDraft(ctx context.Context, in SourceInput) (time
 	return pingSource(ctx, src, *in.Password)
 }
 
-func pingSource(ctx context.Context, src Source, password string) (time.Duration, error) {
-	db, err := openSource(src, password)
+func pingSource(ctx context.Context, src Source, secret string) (time.Duration, error) {
+	conn, err := openSource(src, secret)
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = db.Close() }()
+	defer func() { _ = conn.Close() }()
 
 	pingCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	started := time.Now()
-	if err := db.PingContext(pingCtx); err != nil {
+
+	if conn.HTTP != nil {
+		// An http_api "connection" has no dedicated ping endpoint to speak
+		// of — unlike a DB PingContext, there's no protocol-level
+		// handshake independent of some actual request path. This
+		// deliberately checks reachability + that the TLS/HTTP stack can
+		// talk to the base URL at all (DNS resolves, TCP/TLS connects, the
+		// server answers), NOT that the credentials are valid for a real
+		// endpoint — a bare base URL with no meaningful path isn't
+		// expected to return 2xx even with perfectly correct credentials.
+		// Whether the api-id/api-signature actually authenticate against
+		// a real endpoint is what TestQuery (run against a real job path)
+		// verifies instead.
+		timestamp, signature := signRequest(conn.HTTP.APIID, conn.HTTP.APIKey)
+		q := url.Values{"timestamp": {timestamp}}
+		req, err := http.NewRequestWithContext(pingCtx, http.MethodGet, conn.HTTP.BaseURL+"?"+q.Encode(), nil)
+		if err != nil {
+			return time.Since(started), err
+		}
+		req.Header.Set("api-id", conn.HTTP.APIID)
+		req.Header.Set("api-signature", signature)
+		resp, err := httpClientForSources.Do(req)
+		if err != nil {
+			return time.Since(started), err
+		}
+		_ = resp.Body.Close()
+		return time.Since(started), nil
+	}
+
+	if err := conn.SQL.PingContext(pingCtx); err != nil {
 		return time.Since(started), err
 	}
 	return time.Since(started), nil
@@ -297,6 +345,12 @@ type JobInput struct {
 	Enabled         bool           `json:"enabled"`
 	FilterQuery     *string        `json:"filter_query"`
 	FilterBatchSize *int           `json:"filter_batch_size"`
+
+	// Only meaningful when the job's source is Kind == KindHTTPAPI — see
+	// Job's own comment (models.go) for what each means.
+	SourceFields []string `json:"source_fields"`
+	RecordsPath  string   `json:"records_path"`
+	PageSize     int      `json:"page_size"`
 }
 
 // stripTrailingSemicolon removes one optional trailing ";" (and any
@@ -337,16 +391,43 @@ func (in *JobInput) applyDefaults() {
 		in.FilterQuery = nil
 		in.FilterBatchSize = nil
 	}
+	if in.RecordsPath == "" {
+		in.RecordsPath = "data"
+	}
+	if in.PageSize <= 0 {
+		in.PageSize = 500
+	}
 }
 
-func (in JobInput) validate() error {
+// validate checks in against the shared job invariants (name, dest
+// columns, watermark/mode combination, filter_query shape, etc.) plus
+// whatever's specific to sourceKind — isReadOnlyQuery only makes sense
+// applied to SourceQuery for the three SQL kinds (an http_api
+// source_query is a path+query-string template, not SQL, and this
+// engine's HTTP extraction path only ever issues GET requests regardless
+// of what source_query says, so there's no equivalent "mutating
+// statement" risk to guard against there); http_api instead requires
+// source_fields, matched 1:1 with dest_columns.
+func (in JobInput) validate(sourceKind SourceKind) error {
 	if strings.TrimSpace(in.Name) == "" {
 		return errors.New("name is required")
 	}
 	if strings.TrimSpace(in.SourceID) == "" {
 		return errors.New("source_id is required")
 	}
-	if err := isReadOnlyQuery(in.SourceQuery); err != nil {
+	if sourceKind == KindHTTPAPI {
+		if len(in.SourceFields) != len(in.DestColumns) {
+			return fmt.Errorf("source_fields must list exactly one JSON field per dest_column (got %d fields, %d dest_columns)", len(in.SourceFields), len(in.DestColumns))
+		}
+		for _, f := range in.SourceFields {
+			if strings.TrimSpace(f) == "" {
+				return errors.New("source_fields entries cannot be blank")
+			}
+		}
+		if in.PageSize <= 0 {
+			return errors.New("page_size must be positive")
+		}
+	} else if err := isReadOnlyQuery(in.SourceQuery); err != nil {
 		return fmt.Errorf("source_query: %w", err)
 	}
 	if len(in.DestColumns) == 0 {
@@ -548,12 +629,34 @@ func jobFromInput(id string, in JobInput) *Job {
 		Enabled:         in.Enabled,
 		FilterQuery:     in.FilterQuery,
 		FilterBatchSize: in.FilterBatchSize,
+		SourceFields:    in.SourceFields,
+		RecordsPath:     in.RecordsPath,
+		PageSize:        in.PageSize,
 	}
+}
+
+// sourceKindFor looks up a source's kind by id — CreateJob/UpdateJob need
+// it before validate() can decide which rules apply (see validate's
+// comment), since a job's own input has no kind of its own, only a
+// source_id.
+func (s *Service) sourceKindFor(ctx context.Context, sourceID string) (SourceKind, error) {
+	var kind SourceKind
+	if err := s.db.NewSelect().Model((*Source)(nil)).Column("kind").Where("id = ?", sourceID).Scan(ctx, &kind); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", errors.New("source_id does not exist")
+		}
+		return "", err
+	}
+	return kind, nil
 }
 
 func (s *Service) CreateJob(ctx context.Context, in JobInput) (*Job, error) {
 	in.applyDefaults()
-	if err := in.validate(); err != nil {
+	kind, err := s.sourceKindFor(ctx, in.SourceID)
+	if err != nil {
+		return nil, err
+	}
+	if err := in.validate(kind); err != nil {
 		return nil, err
 	}
 	job := jobFromInput(uuid.New().String(), in)
@@ -565,14 +668,19 @@ func (s *Service) CreateJob(ctx context.Context, in JobInput) (*Job, error) {
 
 func (s *Service) UpdateJob(ctx context.Context, id string, in JobInput) (*Job, error) {
 	in.applyDefaults()
-	if err := in.validate(); err != nil {
+	kind, err := s.sourceKindFor(ctx, in.SourceID)
+	if err != nil {
+		return nil, err
+	}
+	if err := in.validate(kind); err != nil {
 		return nil, err
 	}
 	job := jobFromInput(id, in)
 	res, err := s.db.NewUpdate().Model(job).
 		Column("name", "source_id", "source_query", "dest_schema", "dest_table", "dest_columns",
 			"mode", "watermark_column", "watermark_type", "conflict_columns", "trigger_times",
-			"batch_size", "timeout_seconds", "enabled", "filter_query", "filter_batch_size").
+			"batch_size", "timeout_seconds", "enabled", "filter_query", "filter_batch_size",
+			"source_fields", "records_path", "page_size").
 		Set("updated_at = now()").
 		WherePK().
 		Exec(ctx)
@@ -638,6 +746,13 @@ type TestQueryResult struct {
 	Rows      [][]interface{} `json:"rows"`
 	Truncated bool            `json:"truncated"`
 	ElapsedMs int64           `json:"elapsed_ms"`
+	// DetectedRecordsPath is set only for an http_api source: the single
+	// top-level JSON array field found in the response (e.g. "rows"),
+	// auto-detected since a JSON response has no equivalent of a SQL
+	// SELECT list to read column order/names from. The frontend prefills
+	// the job's records_path with this rather than asking the user to
+	// guess it before ever seeing a real response.
+	DetectedRecordsPath string `json:"detected_records_path,omitempty"`
 }
 
 // TestQuery runs an arbitrary read-only query against a source and returns
@@ -653,34 +768,38 @@ type TestQueryResult struct {
 // check, not a batch pull (a job's real run uses its own timeout_seconds
 // and has no row cap).
 func (s *Service) TestQuery(ctx context.Context, sourceID, query string) (*TestQueryResult, error) {
-	if err := isReadOnlyQuery(query); err != nil {
-		return nil, err
-	}
-	// See stripTrailingSemicolon's comment — a query pasted straight from
-	// SQL*Plus/SQL Developer/DBeaver often still has its trailing ";",
-	// which those tools strip themselves but this engine's Oracle driver
-	// does not accept.
-	query = stripTrailingSemicolon(query)
-
 	src := new(Source)
 	if err := s.db.NewSelect().Model(src).Where("id = ?", sourceID).Scan(ctx); err != nil {
 		return nil, ErrNotFound
 	}
-	password, err := decryptPassword(ctx, s.db, s.credentialsKey, src.PasswordEncrypted)
+	secret, err := decryptPassword(ctx, s.db, s.credentialsKey, src.PasswordEncrypted)
 	if err != nil {
 		return nil, err
 	}
-	db, err := openSource(*src, password)
+	conn, err := openSource(*src, secret)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = db.Close() }()
+	defer func() { _ = conn.Close() }()
 
 	queryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
+	if conn.HTTP != nil {
+		return testHTTPQuery(queryCtx, *conn.HTTP, query)
+	}
+
+	// See stripTrailingSemicolon's comment — a query pasted straight from
+	// SQL*Plus/SQL Developer/DBeaver often still has its trailing ";",
+	// which those tools strip themselves but this engine's Oracle driver
+	// does not accept.
+	if err := isReadOnlyQuery(query); err != nil {
+		return nil, err
+	}
+	query = stripTrailingSemicolon(query)
+
 	started := time.Now()
-	rows, err := db.QueryContext(queryCtx, query)
+	rows, err := conn.SQL.QueryContext(queryCtx, query)
 	if err != nil {
 		return nil, err
 	}

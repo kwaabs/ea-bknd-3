@@ -4,7 +4,6 @@ import (
 	"bknd-3/internal/config"
 	"bknd-3/internal/logger"
 	"context"
-	"database/sql"
 	"fmt"
 	"sync"
 	"time"
@@ -32,7 +31,7 @@ type Engine struct {
 	mu          sync.Mutex
 	jobsByID    map[string]Job
 	sourcesByID map[string]Source
-	sourcePools map[string]*sql.DB            // source ID -> reused connection pool
+	sourcePools map[string]*sourceConn        // source ID -> reused connection (SQL pool or HTTP creds)
 	cancelFuncs map[string]context.CancelFunc // job ID -> stops its scheduling goroutine
 	running     map[string]bool               // job ID -> a run is currently in flight
 }
@@ -66,7 +65,7 @@ func Start(ctx context.Context, db *bun.DB, cfg *config.Config, logr *logger.Log
 		credentialsKey: cfg.ETLCredentialsKey,
 		jobsByID:       make(map[string]Job),
 		sourcesByID:    make(map[string]Source),
-		sourcePools:    make(map[string]*sql.DB),
+		sourcePools:    make(map[string]*sourceConn),
 		cancelFuncs:    make(map[string]context.CancelFunc),
 		running:        make(map[string]bool),
 	}
@@ -265,8 +264,8 @@ func (e *Engine) unlock(jobID string) {
 	delete(e.running, jobID)
 }
 
-// sourceFor returns a cached *sql.DB for a source, opening one on first
-// use. Decrypting the source's password is a real Postgres round trip
+// sourceFor returns a cached *sourceConn for a source, opening one on
+// first use. Decrypting the source's secret is a real Postgres round trip
 // (unlike sql.Open, which only constructs the pool object and doesn't
 // dial anything), so it happens OUTSIDE e.mu — only the map reads/writes
 // around it are guarded, avoiding a slow decrypt (or an external source
@@ -279,7 +278,7 @@ func (e *Engine) unlock(jobID string) {
 // `enabled` in reload (a v1 simplification, not a correctness issue for
 // the common case of a job simply being disabled rather than its source
 // ripped out from under it).
-func (e *Engine) sourceFor(ctx context.Context, sourceID string) (*sql.DB, error) {
+func (e *Engine) sourceFor(ctx context.Context, sourceID string) (*sourceConn, error) {
 	e.mu.Lock()
 	if db, ok := e.sourcePools[sourceID]; ok {
 		e.mu.Unlock()
@@ -317,8 +316,8 @@ func (e *Engine) sourceFor(ctx context.Context, sourceID string) (*sql.DB, error
 // connection to it. Unlike sourceFor (used by the scheduler), this never
 // reads or writes Engine's pooled sourcePools cache — every call opens
 // fresh so it always reflects the source's current config; the caller
-// owns closing the returned *sql.DB.
-func (e *Engine) openSourceByID(ctx context.Context, sourceID string) (*sql.DB, error) {
+// owns closing the returned *sourceConn.
+func (e *Engine) openSourceByID(ctx context.Context, sourceID string) (*sourceConn, error) {
 	src := new(Source)
 	if err := e.db.NewSelect().Model(src).Where("id = ?", sourceID).Scan(ctx); err != nil {
 		return nil, fmt.Errorf("etl: source not found: %w", err)

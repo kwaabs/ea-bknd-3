@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,6 +13,67 @@ import (
 
 	"github.com/uptrace/bun"
 )
+
+// RowSource is whatever runExtractQuery streams a job's extracted rows
+// from — *sql.Rows (the three SQL kinds, opened via sourceDB.QueryContext)
+// or *httpRowSource (KindHTTPAPI, see httpsource.go) satisfy this
+// identically, by having the same method set *sql.Rows already has; no
+// adapter type is needed for either side; runExtractQuery's batching/
+// loading/watermark logic is completely unaware which kind produced the
+// rows it's flushing.
+type RowSource interface {
+	Columns() ([]string, error)
+	Next() bool
+	Scan(dest ...interface{}) error
+	Err() error
+	Close() error
+}
+
+// httpClientForSources is shared by every http_api job — net/http's
+// Transport already pools/reuses connections per host internally, so
+// there's no need for a per-source client the way the SQL kinds need a
+// per-source connection pool (see Engine's sourcePools).
+var httpClientForSources = &http.Client{Timeout: 2 * time.Minute}
+
+// openPlainRowSource builds and opens the RowSource for one plain
+// (non-filtered) run — a SQL query for the three DB kinds, or a paginated
+// HTTP request for KindHTTPAPI. lastWatermark is only consulted for an
+// incremental job; buildQuery/buildHTTPRequest both no-op past it for
+// full_refresh.
+func openPlainRowSource(ctx context.Context, conn *sourceConn, job Job, lastWatermark string) (RowSource, error) {
+	if conn.HTTP != nil {
+		path, values, err := buildHTTPRequest(job, lastWatermark)
+		if err != nil {
+			return nil, err
+		}
+		return newHTTPRowSource(ctx, httpClientForSources, *conn.HTTP, job, path, values), nil
+	}
+	query, err := buildQuery(job, lastWatermark)
+	if err != nil {
+		return nil, err
+	}
+	return conn.SQL.QueryContext(ctx, query)
+}
+
+// openFilteredRowSource is openPlainRowSource's counterpart for one
+// filter_query chunk (see extractAndLoadFiltered) — filterLiteral is
+// already formatted for the target context (SQL IN(...) literal list, or
+// a plain comma-separated query-param value) by the caller, per source
+// kind.
+func openFilteredRowSource(ctx context.Context, conn *sourceConn, job Job, filterLiteral string) (RowSource, error) {
+	if conn.HTTP != nil {
+		path, values, err := buildFilteredHTTPRequest(job, filterLiteral)
+		if err != nil {
+			return nil, err
+		}
+		return newHTTPRowSource(ctx, httpClientForSources, *conn.HTTP, job, path, values), nil
+	}
+	query, err := buildFilteredQuery(job, filterLiteral)
+	if err != nil {
+		return nil, err
+	}
+	return conn.SQL.QueryContext(ctx, query)
+}
 
 // runResult summarizes one job execution for the run-history row and logs.
 type runResult struct {
@@ -21,9 +83,9 @@ type runResult struct {
 
 // runJob executes one job end-to-end: opens a run-history row, extracts +
 // batch-loads (see extractAndLoad), and closes out that row as
-// success/failed. sourceDB is a pooled connection the caller (Engine) owns
+// success/failed. conn is a pooled connection the caller (Engine) owns
 // and reuses across runs of the same source — runJob never closes it.
-func runJob(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job Job) (runResult, error) {
+func runJob(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job) (runResult, error) {
 	var result runResult
 
 	runID, err := insertRunStarted(ctx, destDB, job.ID)
@@ -31,7 +93,7 @@ func runJob(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job Job) (run
 		return result, fmt.Errorf("etl: record run start for job %q: %w", job.Name, err)
 	}
 
-	result, runErr := extractAndLoad(ctx, destDB, sourceDB, job)
+	result, runErr := extractAndLoad(ctx, destDB, conn, job)
 
 	if runErr != nil {
 		if finishErr := finishRun(ctx, destDB, runID, RunStatusFailed, result, runErr.Error()); finishErr != nil {
@@ -49,7 +111,7 @@ func runJob(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job Job) (run
 // case) or once per chunk of job.FilterQuery's results (see
 // extractAndLoadFiltered) — and delegates the actual streaming
 // extract+batch+load work to runExtractQuery either way.
-func extractAndLoad(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job Job) (runResult, error) {
+func extractAndLoad(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job) (runResult, error) {
 	var result runResult
 
 	wmIdx := -1
@@ -64,7 +126,7 @@ func extractAndLoad(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job J
 		// JobInput.validate requires mode=full_refresh whenever
 		// filter_query is set, so wmIdx is always -1 here — see
 		// extractAndLoadFiltered's comment for why the two don't mix.
-		return extractAndLoadFiltered(ctx, destDB, sourceDB, job)
+		return extractAndLoadFiltered(ctx, destDB, conn, job)
 	}
 
 	lastWatermark := defaultWatermarkFor(job)
@@ -78,12 +140,12 @@ func extractAndLoad(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job J
 		}
 	}
 
-	query, err := buildQuery(job, lastWatermark)
+	rows, err := openPlainRowSource(ctx, conn, job, lastWatermark)
 	if err != nil {
 		return result, err
 	}
 
-	return runExtractQuery(ctx, destDB, sourceDB, job, query, wmIdx)
+	return runExtractQuery(ctx, destDB, job, rows, wmIdx)
 }
 
 const defaultFilterBatchSize = 1000
@@ -107,7 +169,7 @@ const defaultFilterBatchSize = 1000
 // them — advancing per-chunk risks skipping rows a later chunk should
 // still have picked up. Rather than get that subtly wrong, incremental +
 // filtered just isn't supported.
-func extractAndLoadFiltered(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job Job) (runResult, error) {
+func extractAndLoadFiltered(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job) (runResult, error) {
 	var total runResult
 
 	values, err := loadFilterValues(ctx, destDB, *job.FilterQuery)
@@ -128,15 +190,25 @@ func extractAndLoadFiltered(ctx context.Context, destDB *bun.DB, sourceDB *sql.D
 		if end > len(values) {
 			end = len(values)
 		}
-		literal, err := formatFilterLiteral(values[start:end])
+		// HTTP query-param values need plain (unquoted) literals — a SQL
+		// IN(...) literal list wrapped in quotes would end up literally
+		// inside a URL query value instead of a SQL clause. See
+		// formatFilterLiteralPlain's comment.
+		var literal string
+		var err error
+		if conn.HTTP != nil {
+			literal, err = formatFilterLiteralPlain(values[start:end])
+		} else {
+			literal, err = formatFilterLiteral(values[start:end])
+		}
 		if err != nil {
 			return total, fmt.Errorf("etl: job %q: %w", job.Name, err)
 		}
-		query, err := buildFilteredQuery(job, literal)
+		rows, err := openFilteredRowSource(ctx, conn, job, literal)
 		if err != nil {
 			return total, err
 		}
-		chunkResult, err := runExtractQuery(ctx, destDB, sourceDB, job, query, -1)
+		chunkResult, err := runExtractQuery(ctx, destDB, job, rows, -1)
 		total.RowsExtracted += chunkResult.RowsExtracted
 		total.RowsLoaded += chunkResult.RowsLoaded
 		if err != nil {
@@ -184,23 +256,20 @@ func loadFilterValues(ctx context.Context, destDB *bun.DB, filterQuery string) (
 	return values, nil
 }
 
-// runExtractQuery streams the given (already-built) query's result set
-// from sourceDB, batches rows into groups of job.BatchSize, and loads each
-// batch into the destination table in its own transaction (batch insert +
-// watermark update together — same "commit the checkpoint with the data
-// it describes" contract as app.migration_checkpoints elsewhere in this
-// repo). A failure partway through leaves every already-committed batch in
-// place and the watermark (if any) advanced up to it. Shared by the plain
-// single-query path and the filtered path (extractAndLoadFiltered calls
-// this once per filter chunk) — everything past "here is the query text
-// to run" is identical either way.
-func runExtractQuery(ctx context.Context, destDB *bun.DB, sourceDB *sql.DB, job Job, query string, wmIdx int) (runResult, error) {
+// runExtractQuery streams the given (already-opened) RowSource — a SQL
+// *sql.Rows for the three DB kinds, or an *httpRowSource paginating a
+// JSON API for KindHTTPAPI, see RowSource's comment — batches rows into
+// groups of job.BatchSize, and loads each batch into the destination
+// table in its own transaction (batch insert + watermark update together
+// — same "commit the checkpoint with the data it describes" contract as
+// app.migration_checkpoints elsewhere in this repo). A failure partway
+// through leaves every already-committed batch in place and the
+// watermark (if any) advanced up to it. Shared by the plain single-query
+// path and the filtered path (extractAndLoadFiltered calls this once per
+// filter chunk) — everything past "here is the already-open row source"
+// is identical either way, regardless of source kind.
+func runExtractQuery(ctx context.Context, destDB *bun.DB, job Job, rows RowSource, wmIdx int) (runResult, error) {
 	var result runResult
-
-	rows, err := sourceDB.QueryContext(ctx, query)
-	if err != nil {
-		return result, fmt.Errorf("etl: query source for job %q: %w", job.Name, err)
-	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()

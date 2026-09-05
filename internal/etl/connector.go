@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	// Blank-imported for their database/sql driver registration side effect
@@ -18,27 +19,51 @@ import (
 	"github.com/uptrace/bun/driver/pgdriver"
 )
 
-// openSource opens a *sql.DB for one Source, per its Kind. password is the
-// already-decrypted plaintext (see crypto.go's decryptPassword and each
-// caller's use of it) — this function has no credential lookup of its own.
-// The returned DB is a real connection pool (not a single connection) —
-// callers should keep it open for reuse across runs of jobs against the
-// same source rather than opening a fresh one per run; see Engine's
-// sourcePool cache in engine.go.
-func openSource(src Source, password string) (*sql.DB, error) {
-	if password == "" {
-		return nil, fmt.Errorf("etl: no password provided for source %q", src.Name)
+// sourceConn is what a job actually runs against — either a pooled SQL
+// connection (the three database kinds) or decrypted HTTP API credentials
+// (KindHTTPAPI). Exactly one of SQL/HTTP is set, per Kind. Introduced so
+// run.go's extraction path, and Engine's per-source cache/lifecycle, have
+// one thing to hold regardless of source kind — an HTTP API has no
+// database/sql driver, connection, or pool to speak of, so forcing it
+// through the *sql.DB-shaped path the three DB kinds already use isn't
+// possible; this is the minimal shared wrapper instead.
+type sourceConn struct {
+	Kind SourceKind
+	SQL  *sql.DB
+	HTTP *httpAPICreds
+}
+
+// Close releases whatever this connection holds. HTTP has nothing to
+// close (no persistent connection of its own — net/http's shared
+// Transport handles connection reuse/pooling beneath it already).
+func (c *sourceConn) Close() error {
+	if c.SQL != nil {
+		return c.SQL.Close()
+	}
+	return nil
+}
+
+// openSource opens a sourceConn for one Source, per its Kind. secret is
+// the already-decrypted plaintext (see crypto.go's decryptPassword and
+// each caller's use of it) — this function has no credential lookup of
+// its own. For the three SQL kinds the returned connection is a real pool
+// (not a single connection) — callers should keep it open for reuse
+// across runs of jobs against the same source rather than opening a fresh
+// one per run; see Engine's sourcePool cache in engine.go.
+func openSource(src Source, secret string) (*sourceConn, error) {
+	if secret == "" {
+		return nil, fmt.Errorf("etl: no password/api key provided for source %q", src.Name)
 	}
 
 	switch src.Kind {
 	case KindOracle:
-		dsn := go_ora.BuildUrl(src.Host, src.Port, src.DatabaseName, src.Username, password, src.ExtraParams)
+		dsn := go_ora.BuildUrl(src.Host, src.Port, src.DatabaseName, src.Username, secret, src.ExtraParams)
 		db, err := sql.Open("oracle", dsn)
 		if err != nil {
 			return nil, fmt.Errorf("etl: open oracle source %q: %w", src.Name, err)
 		}
 		configurePool(db)
-		return db, nil
+		return &sourceConn{Kind: src.Kind, SQL: db}, nil
 
 	case KindMSSQL:
 		q := url.Values{}
@@ -48,7 +73,7 @@ func openSource(src Source, password string) (*sql.DB, error) {
 		}
 		u := url.URL{
 			Scheme:   "sqlserver",
-			User:     url.UserPassword(src.Username, password),
+			User:     url.UserPassword(src.Username, secret),
 			Host:     fmt.Sprintf("%s:%d", src.Host, src.Port),
 			RawQuery: q.Encode(),
 		}
@@ -57,7 +82,7 @@ func openSource(src Source, password string) (*sql.DB, error) {
 			return nil, fmt.Errorf("etl: open mssql source %q: %w", src.Name, err)
 		}
 		configurePool(db)
-		return db, nil
+		return &sourceConn{Kind: src.Kind, SQL: db}, nil
 
 	case KindPostgres:
 		// Same connector construction as internal/database.New, kept
@@ -65,7 +90,7 @@ func openSource(src Source, password string) (*sql.DB, error) {
 		// Postgres DSN in this codebase.
 		dsn := fmt.Sprintf(
 			"postgres://%s:%s@%s:%d/%s",
-			url.QueryEscape(src.Username), url.QueryEscape(password),
+			url.QueryEscape(src.Username), url.QueryEscape(secret),
 			src.Host, src.Port, src.DatabaseName,
 		)
 		if sslmode, ok := src.ExtraParams["sslmode"]; ok {
@@ -80,7 +105,17 @@ func openSource(src Source, password string) (*sql.DB, error) {
 		)
 		db := sql.OpenDB(connector)
 		configurePool(db)
-		return db, nil
+		return &sourceConn{Kind: src.Kind, SQL: db}, nil
+
+	case KindHTTPAPI:
+		if strings.TrimSpace(src.Host) == "" {
+			return nil, fmt.Errorf("etl: http_api source %q has no base URL (host)", src.Name)
+		}
+		return &sourceConn{Kind: src.Kind, HTTP: &httpAPICreds{
+			BaseURL: strings.TrimRight(src.Host, "/"),
+			APIID:   src.Username,
+			APIKey:  secret,
+		}}, nil
 
 	default:
 		return nil, fmt.Errorf("etl: unknown source kind %q for source %q", src.Kind, src.Name)

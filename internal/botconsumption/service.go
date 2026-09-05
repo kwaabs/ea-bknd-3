@@ -81,12 +81,21 @@ func NewService(db *bun.DB) *Service { return &Service{db: db} }
 // to know about or match that padding — same class of naming/formatting
 // mismatch as the Zeus/MMS region-name issues elsewhere in this codebase,
 // just caused by the column type instead of the source data.
+//
+// billmonth gets the same trim() treatment for the same reason, just
+// caused by inconsistent source data instead of a fixed-width column
+// type: different load batches have left stray leading/trailing
+// whitespace on the label (confirmed live — "JAN-2026 " next to
+// "june-2026"). Trimming both the column here and the values
+// resolveDateRangeToBillMonths puts in p.BillMonth means neither side has
+// to byte-exactly match whatever whitespace a given batch happened to
+// leave.
 func (s *Service) base(p FilterParams) *bun.SelectQuery {
 	q := s.db.NewSelect().TableExpr(table)
 	q = dbx.InLower(q, "trim(region)", p.Region)
 	q = dbx.InLower(q, "district", p.District)
 	q = dbx.InLower(q, "tarrif", p.Tariff)
-	q = dbx.InLower(q, "billmonth", p.BillMonth)
+	q = dbx.InLower(q, "trim(billmonth)", p.BillMonth)
 	q = dbx.In(q, "meternumber", p.MeterNumber)
 
 	if p.Search != "" {
@@ -134,7 +143,16 @@ func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterPara
 		return p, false, err
 	}
 
+	// Trimmed and deduped: base() now compares against trim(billmonth), so
+	// the values put here must be trimmed the same way, or a comparison
+	// against the padded raw value would never match the trimmed column
+	// expression. Two distinct raw labels that only differ by whitespace
+	// (e.g. "JAN-2026" and "JAN-2026 ", both present as separate DISTINCT
+	// rows) trim down to the same string — seenTrimmed skips the repeat
+	// rather than sending a harmless but redundant duplicate into the IN
+	// list.
 	matched := make([]string, 0, len(raw))
+	seenTrimmed := make(map[string]bool, len(raw))
 	for _, r := range raw {
 		t, ok := parseBillMonth(r)
 		if !ok {
@@ -147,7 +165,12 @@ func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterPara
 		if !p.DateTo.IsZero() && k > monthKey(p.DateTo) {
 			continue
 		}
-		matched = append(matched, r)
+		trimmed := strings.TrimSpace(r)
+		if seenTrimmed[trimmed] {
+			continue
+		}
+		seenTrimmed[trimmed] = true
+		matched = append(matched, trimmed)
 	}
 
 	if len(matched) == 0 {
@@ -178,8 +201,9 @@ func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Paginatio
 }
 
 // groupExpr maps a whitelisted groupBy key to its (select, group-by) SQL
-// pair — region needs trim(), tariff needs to rename off the source
-// table's "tarrif" typo, the rest are plain columns.
+// pair — region and billmonth need trim() (see base()'s comment on both),
+// tariff needs to rename off the source table's "tarrif" typo, district
+// is the one plain column.
 func groupExpr(g string) (selectExpr, groupByExpr string, ok bool) {
 	switch g {
 	case "region":
@@ -189,7 +213,7 @@ func groupExpr(g string) (selectExpr, groupByExpr string, ok bool) {
 	case "tariff":
 		return "tarrif AS tariff", "tarrif", true
 	case "billmonth":
-		return "billmonth", "billmonth", true
+		return "trim(billmonth) AS billmonth", "trim(billmonth)", true
 	default:
 		return "", "", false
 	}

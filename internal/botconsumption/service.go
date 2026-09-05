@@ -14,15 +14,29 @@ import (
 
 const table = "app.bot_consumption"
 
-// monthByName maps a lowercase month name to its time.Month, for parsing
-// billmonth labels ("june-2026"). Deliberately independent of Go's own
-// "January" layout parsing, which requires exact capitalization — this
-// matches any case the source data happens to use.
+// monthByName maps a lowercase month name OR its standard 3-letter
+// abbreviation to its time.Month, for parsing billmonth labels
+// ("june-2026", "JAN-2026"). Deliberately independent of Go's own
+// "January"/"Jan" layout parsing, which requires exact capitalization —
+// this matches any case the source data happens to use. Both forms are
+// listed because different load batches have used different ones for
+// different months (confirmed live: "JAN-2026" alongside "june-2026" in
+// the same table) — a label using either must resolve the same way, or a
+// date-range query silently loses whichever months happened to be
+// abbreviated that time.
 var monthByName = map[string]time.Month{
-	"january": time.January, "february": time.February, "march": time.March,
-	"april": time.April, "may": time.May, "june": time.June,
-	"july": time.July, "august": time.August, "september": time.September,
-	"october": time.October, "november": time.November, "december": time.December,
+	"january": time.January, "jan": time.January,
+	"february": time.February, "feb": time.February,
+	"march": time.March, "mar": time.March,
+	"april": time.April, "apr": time.April,
+	"may":  time.May,
+	"june": time.June, "jun": time.June,
+	"july": time.July, "jul": time.July,
+	"august": time.August, "aug": time.August,
+	"september": time.September, "sep": time.September, "sept": time.September,
+	"october": time.October, "oct": time.October,
+	"november": time.November, "nov": time.November,
+	"december": time.December, "dec": time.December,
 }
 
 // parseBillMonth parses a "monthname-year" label into the first of that

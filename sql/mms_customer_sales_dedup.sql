@@ -69,6 +69,8 @@ AS $$
 DECLARE
     v_from timestamptz := p_from;
     v_to   timestamptz := p_to + 1;
+    v_touched_meters int;
+    v_rows_changed int;
 BEGIN
     DROP TABLE IF EXISTS _mms_touched_meters;
     CREATE TEMP TABLE _mms_touched_meters ON COMMIT DROP AS
@@ -76,6 +78,10 @@ BEGIN
     FROM app.mms_customer_sales
     WHERE date_time >= v_from AND date_time < v_to
       AND meter_number IS NOT NULL AND meter_number <> '';
+
+    GET DIAGNOSTICS v_touched_meters = ROW_COUNT;
+    RAISE NOTICE 'resync_mms_duplicate_flags(%, %): % meter(s) touched, recomputing full history for each',
+        p_from, p_to, v_touched_meters;
 
     WITH ranked AS (
         SELECT
@@ -94,6 +100,10 @@ BEGIN
     FROM ranked
     WHERE z.ctid = ranked.ctid
       AND z.is_duplicate_reading IS DISTINCT FROM (ranked.rn > 1);
+
+    GET DIAGNOSTICS v_rows_changed = ROW_COUNT;
+    RAISE NOTICE 'resync_mms_duplicate_flags(%, %): done, % row(s) had their flag changed',
+        p_from, p_to, v_rows_changed;
 END;
 $$;
 

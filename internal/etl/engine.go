@@ -156,6 +156,15 @@ func (e *Engine) scheduleJob(ctx context.Context, jobID string) {
 			if !ok {
 				return
 			}
+			if len(job.TriggerTimes) == 0 {
+				// A deliberate, valid state (see trigger_times's comment in
+				// sql/etl_engine.sql) — a manual-only job, not a
+				// misconfigured one. Nothing to schedule; the goroutine
+				// just exits, and "Run now" (Engine.TriggerNow) is
+				// unaffected since it never consults trigger_times.
+				e.logr.Info("etl: job has no trigger_times — manual-only, will not run automatically", zap.String("job", job.Name))
+				return
+			}
 			next, err := nextTriggerTime(job.TriggerTimes, time.Now().UTC())
 			if err != nil {
 				e.logr.Error("etl: invalid trigger_times, job will not run", zap.String("job", job.Name), zap.Error(err))

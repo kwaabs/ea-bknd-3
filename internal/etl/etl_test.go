@@ -271,6 +271,36 @@ func TestJobInputValidate_IncrementalRequiresWatermarkInDestColumns(t *testing.T
 	}
 }
 
+func TestJobInputValidate_EmptyTriggerTimesIsValid(t *testing.T) {
+	in := JobInput{
+		Name:         "manual-only-job",
+		SourceID:     "some-source",
+		SourceQuery:  "SELECT id FROM t",
+		DestSchema:   "app",
+		DestTable:    "raw_t",
+		DestColumns:  []string{"id"},
+		Mode:         ModeFullRefresh,
+		TriggerTimes: nil, // no automatic schedule -- run via "Run now" only
+	}
+	if err := in.validate(); err != nil {
+		t.Fatalf("expected a job with no trigger_times to be valid (manual-only), got: %v", err)
+	}
+}
+
+func TestJobInputValidate_MalformedTriggerTimeStillRejected(t *testing.T) {
+	in := JobInput{
+		Name:         "job",
+		SourceID:     "some-source",
+		SourceQuery:  "SELECT id FROM t",
+		DestColumns:  []string{"id"},
+		Mode:         ModeFullRefresh,
+		TriggerTimes: []string{"25:99"},
+	}
+	if err := in.validate(); err == nil {
+		t.Fatal("expected validation error for a malformed trigger time, got none")
+	}
+}
+
 func TestFormatFilterLiteral(t *testing.T) {
 	got, err := formatFilterLiteral([]interface{}{"M001", "M'02", int64(3), 4.5})
 	if err != nil {

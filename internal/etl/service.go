@@ -354,9 +354,10 @@ func (in JobInput) validate() error {
 			return errors.New("watermark_column must also appear in dest_columns")
 		}
 	}
-	if len(in.TriggerTimes) == 0 {
-		return errors.New("trigger_times must have at least one entry")
-	}
+	// Empty is valid on purpose — a job with no trigger_times has no
+	// automatic schedule at all, only ever run via "Run now" (see
+	// Engine.scheduleJob and TriggerNow). Whatever entries ARE present
+	// still have to be well-formed.
 	for _, t := range in.TriggerTimes {
 		if _, err := time.Parse("15:04", t); err != nil {
 			return fmt.Errorf("invalid trigger time %q, expected HH:MM (24h)", t)

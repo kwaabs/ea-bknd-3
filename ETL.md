@@ -163,6 +163,12 @@ regardless of how many jobs' trigger times land close together. A job
 whose previous run is still in progress when its next trigger fires is
 skipped, not queued or run twice at once.
 
+`trigger_times` may be empty — a deliberate "manual-only" job with no
+automatic schedule at all, meant for a one-off/ad-hoc pull you only ever
+want to trigger by hand via "Run now" (which works regardless of
+`trigger_times`, since it never consults it). That goroutine just logs it
+once and exits; nothing else about the job is affected.
+
 ## Observability
 
 ```sql

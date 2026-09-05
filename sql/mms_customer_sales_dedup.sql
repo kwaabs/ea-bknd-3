@@ -145,12 +145,21 @@ $$;
 --     → DeleteByPrefix (cache invalidation, unchanged)
 -- ---------------------------------------------------------------------------
 
--- One-time backfill over all existing data. Run resync_mms_duplicate_flags
+-- ONE-TIME backfill over all existing data only. Run resync_mms_duplicate_flags
 -- FIRST, then resync_mms_sales_summary — the summary rebuild depends on the
 -- flags already being set. Safe to re-run either. This re-scans the whole
 -- table, so run it in a low-traffic window; sanity-check on one narrow
 -- month first before the full range, same recommendation as the Zeus
 -- backfills.
+--
+-- Do NOT run this min..max form after every load — every meter in the
+-- table falls inside [min(date_time), max(date_time)], so it is a full
+-- rescan/rewrite of app.mms_customer_sales every time, and gets slower as
+-- the table grows (21M+ rows and counting). For routine "run after every
+-- update" maintenance, use sql/mms_resync_watermark.sql's
+-- app.resync_mms_incremental() instead — it only covers the window since
+-- the last run:
+--   SELECT app.resync_mms_incremental();
 -- SELECT app.resync_mms_duplicate_flags(
 --     (SELECT min(date_time)::date FROM app.mms_customer_sales),
 --     (SELECT max(date_time)::date FROM app.mms_customer_sales)

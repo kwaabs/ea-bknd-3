@@ -424,6 +424,15 @@ func testHTTPQuery(ctx context.Context, creds httpAPICreds, sourceQuery string) 
 	}
 
 	result := &TestQueryResult{
+		// Columns must be a real (possibly empty) slice, not Go's nil
+		// zero value — a nil []string marshals to JSON "null", and the
+		// frontend always treats result.columns as an array (calling
+		// .length/.map on it without a null check), so a query that
+		// legitimately matches zero records — there being no data to
+		// derive column names from — used to come back as
+		// "columns": null and crash the wizard instead of showing "no
+		// columns returned."
+		Columns:             []string{},
 		Rows:                make([][]interface{}, 0, len(records)),
 		DetectedRecordsPath: recordsPath,
 		ElapsedMs:           time.Since(started).Milliseconds(),

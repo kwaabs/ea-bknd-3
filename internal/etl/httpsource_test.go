@@ -297,3 +297,46 @@ func TestHTTPRowSource_NonOKStatusSurfacesAsError(t *testing.T) {
 		t.Fatal("expected Err() to report the 401, got nil")
 	}
 }
+
+// TestTestHTTPQuery_ZeroRecordsReturnsEmptyColumnsArray guards against the
+// exact live bug this was written to fix: a query matching zero records
+// used to leave TestQueryResult.Columns as Go's nil []string, which
+// encoding/json renders as "columns": null. The frontend always treats
+// result.columns as an array (no null check), so that crashed the wizard
+// with "Cannot read properties of null (reading 'length')" the moment an
+// operator tested a month with no data. Asserts the actual marshaled JSON
+// bytes, not just the Go value, since "nil slice vs empty slice" is
+// exactly the kind of distinction a Go-level assertion could paper over.
+func TestTestHTTPQuery_ZeroRecordsReturnsEmptyColumnsArray(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"limit": 2000, "offset": 0, "rows": []interface{}{},
+		})
+	}))
+	defer srv.Close()
+
+	creds := httpAPICreds{BaseURL: srv.URL, APIID: "id", APIKey: "key"}
+	result, err := testHTTPQuery(context.Background(), creds, "/api/v1/sales?year=2026&month=1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Columns == nil {
+		t.Fatal("Columns is nil — will marshal to JSON null and crash the frontend")
+	}
+	if len(result.Columns) != 0 {
+		t.Fatalf("Columns = %v, want empty", result.Columns)
+	}
+
+	b, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if string(decoded["columns"]) != "[]" {
+		t.Fatalf(`"columns" field in the JSON response = %s, want "[]" (not null)`, decoded["columns"])
+	}
+}

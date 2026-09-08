@@ -13,7 +13,7 @@
 --                          rest exactly like a DB password already is —
 --                          see crypto.go; never sent on the wire itself,
 --                          only used locally to compute the HMAC
---                          signature sent as the api-signature header)
+--                          signature sent as the "signature" header)
 --   port, database_name  -> unused for this kind; NOT NULL is dropped
 --                          below so a source row doesn't need meaningless
 --                          placeholder values

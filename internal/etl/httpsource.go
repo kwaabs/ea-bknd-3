@@ -338,7 +338,13 @@ func fetchJSONPage(ctx context.Context, client *http.Client, creds httpAPICreds,
 		return nil, fmt.Errorf("etl: build http request: %w", err)
 	}
 	req.Header.Set("api-id", creds.APIID)
-	req.Header.Set("api-signature", signature)
+	// Header key is "signature", not "api-signature" — matches the
+	// literal Postman collection variable name
+	// (pm.collectionVariables.set("signature", ...)) that gets templated
+	// into the request's Headers tab; "api-signature" was a paraphrase,
+	// not the real key, and produced a live 401 "missing signature
+	// header" from the actual API.
+	req.Header.Set("signature", signature)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)

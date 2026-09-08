@@ -299,9 +299,9 @@ func pingSource(ctx context.Context, src Source, secret string) (time.Duration, 
 		// server answers), NOT that the credentials are valid for a real
 		// endpoint — a bare base URL with no meaningful path isn't
 		// expected to return 2xx even with perfectly correct credentials.
-		// Whether the api-id/api-signature actually authenticate against
-		// a real endpoint is what TestQuery (run against a real job path)
-		// verifies instead.
+		// Whether the api-id/signature headers actually authenticate
+		// against a real endpoint is what TestQuery (run against a real
+		// job path) verifies instead.
 		timestamp, signature := signRequest(conn.HTTP.APIID, conn.HTTP.APIKey)
 		q := url.Values{"timestamp": {timestamp}}
 		req, err := http.NewRequestWithContext(pingCtx, http.MethodGet, conn.HTTP.BaseURL+"?"+q.Encode(), nil)
@@ -309,7 +309,7 @@ func pingSource(ctx context.Context, src Source, secret string) (time.Duration, 
 			return time.Since(started), err
 		}
 		req.Header.Set("api-id", conn.HTTP.APIID)
-		req.Header.Set("api-signature", signature)
+		req.Header.Set("signature", signature) // see httpsource.go's fetchJSONPage comment on the real header key
 		resp, err := httpClientForSources.Do(req)
 		if err != nil {
 			return time.Since(started), err

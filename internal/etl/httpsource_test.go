@@ -141,7 +141,7 @@ func TestBuildFilteredHTTPRequest_Substitution(t *testing.T) {
 // TestHTTPRowSource_PaginatesSignsAndExtractsFields is the closest thing
 // to an end-to-end proof of the whole http_api extraction path: a real
 // httptest.Server mimicking the source API's exact contract (api-id/
-// api-signature headers, timestamp/limit/offset query params, {limit,
+// signature headers, timestamp/limit/offset query params, {limit,
 // offset, rows: [...]} envelope), verifying on the SERVER side that every
 // request's signature is valid for its own timestamp (catching any subtle
 // off-by-one in what gets signed), and on the CLIENT side that
@@ -160,7 +160,7 @@ func TestHTTPRowSource_PaginatesSignsAndExtractsFields(t *testing.T) {
 		requests = append(requests, r.Clone(context.Background()))
 
 		gotID := r.Header.Get("api-id")
-		gotSig := r.Header.Get("api-signature")
+		gotSig := r.Header.Get("signature")
 		timestamp := r.URL.Query().Get("timestamp")
 		if gotID != apiID {
 			t.Errorf("request missing/wrong api-id header: %q", gotID)
@@ -170,7 +170,7 @@ func TestHTTPRowSource_PaginatesSignsAndExtractsFields(t *testing.T) {
 		mac.Write([]byte(gotID))
 		wantSig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 		if gotSig != wantSig {
-			t.Errorf("request has an invalid api-signature for its own timestamp %q: got %q want %q", timestamp, gotSig, wantSig)
+			t.Errorf("request has an invalid signature for its own timestamp %q: got %q want %q", timestamp, gotSig, wantSig)
 		}
 		if r.URL.Query().Get("year") != "2026" {
 			t.Errorf("static query param 'year' missing/wrong: %v", r.URL.Query())

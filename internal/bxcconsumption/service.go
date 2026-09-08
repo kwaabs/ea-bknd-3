@@ -14,15 +14,28 @@ import (
 
 const table = "app.bxc_consumption"
 
-// monthByName maps a lowercase month name to its time.Month, for parsing
-// billmonth labels ("JULY-2026"). Deliberately independent of Go's own
-// "January" layout parsing, which requires exact capitalization — this
-// matches any case the source data happens to use.
+// monthByName maps a lowercase month name OR its standard 3-letter
+// abbreviation to its time.Month, for parsing billmonth labels
+// ("JULY-2026", "JUL-2026"). Deliberately independent of Go's own
+// "January"/"Jan" layout parsing, which requires exact capitalization —
+// this matches any case the source data happens to use. Both forms are
+// listed for the same reason botconsumption's identical map does: different
+// load batches use different ones for different months, and a label using
+// either must resolve the same way or a date-range query silently loses
+// whichever months happened to be abbreviated that time.
 var monthByName = map[string]time.Month{
-	"january": time.January, "february": time.February, "march": time.March,
-	"april": time.April, "may": time.May, "june": time.June,
-	"july": time.July, "august": time.August, "september": time.September,
-	"october": time.October, "november": time.November, "december": time.December,
+	"january": time.January, "jan": time.January,
+	"february": time.February, "feb": time.February,
+	"march": time.March, "mar": time.March,
+	"april": time.April, "apr": time.April,
+	"may":  time.May,
+	"june": time.June, "jun": time.June,
+	"july": time.July, "jul": time.July,
+	"august": time.August, "aug": time.August,
+	"september": time.September, "sep": time.September, "sept": time.September,
+	"october": time.October, "oct": time.October,
+	"november": time.November, "nov": time.November,
+	"december": time.December, "dec": time.December,
 }
 
 // parseBillMonth parses a "monthname-year" label into the first of that
@@ -62,12 +75,19 @@ func NewService(db *bun.DB) *Service { return &Service{db: db} }
 // base returns a select on app.bxc_consumption with all filters applied.
 // Unlike botconsumption, region here is plain varchar(10) — no bpchar
 // padding, so no trim() is needed on it.
+//
+// billmonth DOES need trim() though, same as botconsumption's identical
+// column — free text, not a fixed-width type, and inconsistently padded
+// across load batches ("JAN-2026 " next to "june-2026"). Trimming both the
+// column here and the values resolveDateRangeToBillMonths puts in
+// p.BillMonth means neither side has to byte-exactly match whatever
+// whitespace a given batch happened to leave.
 func (s *Service) base(p FilterParams) *bun.SelectQuery {
 	q := s.db.NewSelect().TableExpr(table)
 	q = dbx.InLower(q, "region", p.Region)
 	q = dbx.InLower(q, "district", p.District)
 	q = dbx.InLower(q, "tarrif", p.Tariff)
-	q = dbx.InLower(q, "billmonth", p.BillMonth)
+	q = dbx.InLower(q, "trim(billmonth)", p.BillMonth)
 	q = dbx.In(q, "meternumber", p.MeterNumber)
 
 	if p.Search != "" {
@@ -114,7 +134,16 @@ func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterPara
 		return p, false, err
 	}
 
+	// Trimmed and deduped: base() now compares against trim(billmonth), so
+	// the values put here must be trimmed the same way, or a comparison
+	// against the padded raw value would never match the trimmed column
+	// expression. Two distinct raw labels that only differ by whitespace
+	// (e.g. "JAN-2026" and "JAN-2026 ", both present as separate DISTINCT
+	// rows) trim down to the same string — seenTrimmed skips the repeat
+	// rather than sending a harmless but redundant duplicate into the IN
+	// list.
 	matched := make([]string, 0, len(raw))
+	seenTrimmed := make(map[string]bool, len(raw))
 	for _, r := range raw {
 		t, ok := parseBillMonth(r)
 		if !ok {
@@ -127,7 +156,12 @@ func (s *Service) resolveDateRangeToBillMonths(ctx context.Context, p FilterPara
 		if !p.DateTo.IsZero() && k > monthKey(p.DateTo) {
 			continue
 		}
-		matched = append(matched, r)
+		trimmed := strings.TrimSpace(r)
+		if seenTrimmed[trimmed] {
+			continue
+		}
+		seenTrimmed[trimmed] = true
+		matched = append(matched, trimmed)
 	}
 
 	if len(matched) == 0 {
@@ -189,9 +223,9 @@ func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Paginatio
 }
 
 // groupExpr maps a whitelisted groupBy key to its (select, group-by) SQL
-// pair — tariff needs to rename off the source table's "tarrif" typo, the
-// rest are plain columns (no trim needed on region here, unlike
-// botconsumption).
+// pair — tariff needs to rename off the source table's "tarrif" typo,
+// billmonth needs trim() (see base()'s comment), region/district are the
+// plain columns (no trim needed on region here, unlike botconsumption).
 func groupExpr(g string) (selectExpr, groupByExpr string, ok bool) {
 	switch g {
 	case "region":
@@ -201,7 +235,7 @@ func groupExpr(g string) (selectExpr, groupByExpr string, ok bool) {
 	case "tariff":
 		return "tarrif AS tariff", "tarrif", true
 	case "billmonth":
-		return "billmonth", "billmonth", true
+		return "trim(billmonth) AS billmonth", "trim(billmonth)", true
 	default:
 		return "", "", false
 	}

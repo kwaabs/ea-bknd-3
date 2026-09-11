@@ -30,15 +30,29 @@
 --   3. meter_number was a straight passthrough from the temp table. The
 --      ETL job can never populate it (an Oracle-only query has no access
 --      to app.meters), so it landed NULL and stayed NULL through this
---      script too. Fixed with a LEFT JOIN to app.meters on udis_id --
---      LEFT, not INNER, so a reading from a device app.meters doesn't
---      recognize still lands (meter_number NULL) rather than being
---      silently dropped, same "don't lose data" principle the original
---      script already followed everywhere else.
+--      script too. Fixed with an INNER JOIN to app.meters on udis_id --
+--      only readings from a device app.meters actually recognizes get
+--      kept. This is also the ETL job's stand-in for the meter filter the
+--      old FME process applied at the Oracle end (via a live M_METER
+--      lookup): the ETL job itself pulls every device's rows (Oracle has
+--      no index on RD_METER_READS.ID to filter by there without risking
+--      the query-duration failure documented below), and this INNER JOIN
+--      is where unrecognized-device rows actually get dropped instead --
+--      same end result in app.raw_meter_readings, no Oracle-side cost.
 --
 -- ASSUMPTION: app.meters.udis_id is text (confirmed against
 -- internal/meters/model.go's `UdisID *string`), hence the `t.id::text`
 -- cast below rather than casting udis_id to bigint.
+--
+-- NOTE on query duration: a run of the old FME process against this same
+-- source (meter-filtered AND date-windowed) took 4h12m and still failed
+-- with ORA-01555 (snapshot too old) -- a long-running-query failure, not
+-- specific to filtering. RD_METER_READS.ID has no index, so filtering by
+-- it doesn't reduce Oracle's scan time, only the row count returned; the
+-- actual defense against this failure is keeping the ETL job's tv_update
+-- watermark window narrow (run it often), not filtering by meter at the
+-- Oracle end -- which is why that filtering happens here instead, in
+-- Postgres, where it's nearly free.
 
 CREATE OR REPLACE FUNCTION app.safe_numeric(v text)
 RETURNS numeric
@@ -67,12 +81,13 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_min_tv   bigint;
-    v_max_tv   bigint;
-    v_min_date date;
-    v_max_date date;
-    v_deleted  int;
-    v_inserted int;
+    v_min_tv    bigint;
+    v_max_tv    bigint;
+    v_min_date  date;
+    v_max_date  date;
+    v_deleted   int;
+    v_inserted  int;
+    v_extracted int;
 BEGIN
     -- 1. Range of data in the temp table -- still needed for the daily-
     -- aggregate recalc below, which legitimately does span every meter
@@ -87,6 +102,8 @@ BEGIN
         RETURN;
     END IF;
 
+    SELECT count(*) INTO v_extracted FROM app.raw_meter_readings_temp;
+
     -- 2. Delete only the production rows this batch is about to replace --
     -- keyed on the same (source_id, tv, data_item_id) triple the insert
     -- below is keyed on, not a blanket tv range that would also catch
@@ -99,8 +116,9 @@ BEGIN
     GET DIAGNOSTICS v_deleted = ROW_COUNT;
 
     -- 3. Insert temp data into production. meter_number resolved via
-    -- app.meters (LEFT JOIN, see comment above); val cast guarded via
-    -- safe_numeric() instead of a bare ::double precision.
+    -- app.meters (INNER JOIN -- unrecognized devices are dropped here,
+    -- see comment above); val cast guarded via safe_numeric() instead of
+    -- a bare ::double precision.
     INSERT INTO app.raw_meter_readings (meter_number, source_id, tv, data_item_id, val, tv_update)
     SELECT
         m.meter_number,
@@ -110,7 +128,7 @@ BEGIN
         app.safe_numeric(t.val)::double precision,
         t.tv_update
     FROM app.raw_meter_readings_temp t
-    LEFT JOIN app.meters m ON m.udis_id = t.id::text;
+    INNER JOIN app.meters m ON m.udis_id = t.id::text;
     GET DIAGNOSTICS v_inserted = ROW_COUNT;
 
     -- 4. Clear existing daily aggregates for the affected date range.
@@ -120,8 +138,13 @@ BEGIN
     -- 5. Recalculate daily consumption for the migrated date range.
     PERFORM app.calculate_daily_consumption(v_min_date, v_max_date, true);
 
-    RAISE NOTICE 'migrate_raw_meter_readings: % row(s) replaced, % row(s) inserted, dates % to %',
-        v_deleted, v_inserted, v_min_date, v_max_date;
+    -- v_extracted - v_inserted is how many rows this run dropped as
+    -- unrecognized devices -- worth watching: a number that's usually
+    -- near zero but suddenly grows is a signal udis_id has drifted again
+    -- (see refresh_meters_udis_id.sql) or a genuinely new device showed
+    -- up in Oracle before app.meters knew about it.
+    RAISE NOTICE 'migrate_raw_meter_readings: % row(s) extracted, % row(s) replaced, % row(s) inserted (% dropped, unrecognized device), dates % to %',
+        v_extracted, v_deleted, v_inserted, v_extracted - v_inserted, v_min_date, v_max_date;
 
     -- 6. Clear the temp table now that it's been migrated.
     TRUNCATE app.raw_meter_readings_temp;

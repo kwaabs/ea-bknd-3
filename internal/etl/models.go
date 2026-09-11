@@ -51,9 +51,14 @@ const (
 type RunStatus string
 
 const (
-	RunStatusRunning RunStatus = "running"
-	RunStatusSuccess RunStatus = "success"
-	RunStatusFailed  RunStatus = "failed"
+	RunStatusRunning   RunStatus = "running"
+	RunStatusSuccess   RunStatus = "success"
+	RunStatusFailed    RunStatus = "failed"
+	// RunStatusCancelled is a run stopped deliberately via the admin UI's
+	// Stop action (Engine.Cancel), distinct from RunStatusFailed -- an
+	// operator choosing to stop a run is a different fact than the run
+	// breaking on its own, and the two shouldn't look the same in history.
+	RunStatusCancelled RunStatus = "cancelled"
 )
 
 // Source is one external database this engine can pull from. The password
@@ -164,6 +169,18 @@ type JobRun struct {
 	RowsExtracted int64      `bun:"rows_extracted"      json:"rows_extracted"`
 	RowsLoaded    int64      `bun:"rows_loaded"         json:"rows_loaded"`
 	ErrorMessage  *string    `bun:"error_message"       json:"error_message"`
+}
+
+// RunningJob is one currently in-flight run, joined with its job's name —
+// the admin UI's "what's running right now" view across every job at once,
+// not one job's own history (see Service.ListRunningRuns).
+type RunningJob struct {
+	RunID         int64     `bun:"id"             json:"run_id"`
+	JobID         string    `bun:"job_id"         json:"job_id"`
+	JobName       string    `bun:"job_name"       json:"job_name"`
+	StartedAt     time.Time `bun:"started_at"     json:"started_at"`
+	RowsExtracted int64     `bun:"rows_extracted" json:"rows_extracted"`
+	RowsLoaded    int64     `bun:"rows_loaded"    json:"rows_loaded"`
 }
 
 // DestColumnInfo describes one column of a candidate destination table —

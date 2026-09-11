@@ -4,6 +4,7 @@ import (
 	"bknd-3/internal/config"
 	"bknd-3/internal/logger"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -34,6 +35,7 @@ type Engine struct {
 	sourcePools map[string]*sourceConn        // source ID -> reused connection (SQL pool or HTTP creds)
 	cancelFuncs map[string]context.CancelFunc // job ID -> stops its scheduling goroutine
 	running     map[string]bool               // job ID -> a run is currently in flight
+	runCancels  map[int64]context.CancelFunc  // run ID -> cancels that one in-flight run (Cancel/"Stop")
 }
 
 // Start builds an Engine and launches its worker pool and reload loop as
@@ -68,6 +70,7 @@ func Start(ctx context.Context, db *bun.DB, cfg *config.Config, logr *logger.Log
 		sourcePools:    make(map[string]*sourceConn),
 		cancelFuncs:    make(map[string]context.CancelFunc),
 		running:        make(map[string]bool),
+		runCancels:     make(map[int64]context.CancelFunc),
 	}
 
 	for i := 0; i < workers; i++ {
@@ -225,15 +228,26 @@ func (e *Engine) runOnce(ctx context.Context, job Job) {
 		return
 	}
 
+	// Recorded via the reload loop's own long-lived ctx, not runCtx below --
+	// the run-started row has to exist before runCtx even exists, since
+	// registering this run's cancel func needs its id.
+	runID, err := insertRunStarted(ctx, e.db, job.ID)
+	if err != nil {
+		e.logr.Error("etl: record run start failed", zap.String("job", job.Name), zap.Error(err))
+		return
+	}
+
 	timeout := time.Duration(job.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = time.Hour
 	}
 	runCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	e.registerRunCancel(runID, cancel)
+	defer e.unregisterRunCancel(runID)
 	defer cancel()
 
 	started := time.Now()
-	result, err := runJob(runCtx, e.db, sourceDB, job)
+	result, err := runJob(runCtx, e.db, sourceDB, job, runID)
 	elapsed := time.Since(started)
 
 	if err != nil {
@@ -372,6 +386,8 @@ func (e *Engine) TriggerNow(ctx context.Context, jobID string) (int64, error) {
 			timeout = time.Hour
 		}
 		runCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		e.registerRunCancel(runID, cancel)
+		defer e.unregisterRunCancel(runID)
 		defer cancel()
 
 		result, runErr := extractAndLoad(runCtx, e.db, sourceDB, *job)
@@ -379,8 +395,16 @@ func (e *Engine) TriggerNow(ctx context.Context, jobID string) (int64, error) {
 		errMsg := ""
 		if runErr != nil {
 			status = RunStatusFailed
+			// Distinguishes an operator's Stop (runCtx cancelled directly)
+			// from a real failure or a timeout (runCtx.Err() would be
+			// context.DeadlineExceeded instead) -- Cancel and the timeout
+			// share the same context.CancelFunc, but only an explicit
+			// Cancel() call produces context.Canceled specifically.
+			if errors.Is(runCtx.Err(), context.Canceled) {
+				status = RunStatusCancelled
+			}
 			errMsg = runErr.Error()
-			e.logr.Error("etl: manual run failed", zap.String("job", job.Name), zap.Error(runErr))
+			e.logr.Error("etl: manual run failed", zap.String("job", job.Name), zap.Error(runErr), zap.String("status", string(status)))
 		} else {
 			e.logr.Info("etl: manual run complete",
 				zap.String("job", job.Name),
@@ -393,6 +417,46 @@ func (e *Engine) TriggerNow(ctx context.Context, jobID string) (int64, error) {
 	}()
 
 	return runID, nil
+}
+
+// registerRunCancel/unregisterRunCancel track the cancel func for each
+// currently in-flight run, keyed by run id -- both runOnce (scheduled) and
+// TriggerNow (manual) register theirs right after the run row exists, and
+// unregister once that run's own goroutine returns, win or lose. Reuses e.mu
+// rather than a separate mutex; contention here is negligible next to the
+// actual extract/load work these calls bracket.
+func (e *Engine) registerRunCancel(runID int64, cancel context.CancelFunc) {
+	e.mu.Lock()
+	e.runCancels[runID] = cancel
+	e.mu.Unlock()
+}
+
+func (e *Engine) unregisterRunCancel(runID int64) {
+	e.mu.Lock()
+	delete(e.runCancels, runID)
+	e.mu.Unlock()
+}
+
+// Cancel stops one in-flight run — the admin UI's "Stop" action. Cancelling
+// the run's context genuinely interrupts the underlying query, not just the
+// local wait: for the three SQL source kinds, go-ora/go-mssqldb/pgdriver all
+// react to context cancellation by signaling the server to abort server-side
+// (go-ora's session.StartContext sends Oracle's own out-of-band BREAK, the
+// same mechanism a client-side Ctrl+C cancel uses) — this isn't just giving
+// up on reading a response that keeps computing anyway.
+//
+// Returns an error if runID isn't currently tracked as in-flight (already
+// finished one way or another, or an invalid id) — same "tell the caller
+// plainly" contract TriggerNow already uses for "already running".
+func (e *Engine) Cancel(runID int64) error {
+	e.mu.Lock()
+	cancel, ok := e.runCancels[runID]
+	e.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("etl: run %d is not currently running", runID)
+	}
+	cancel()
+	return nil
 }
 
 // nextTriggerTime returns the soonest of times (each "HH:MM", 24h, UTC)

@@ -714,6 +714,36 @@ func (s *Service) RunNow(ctx context.Context, jobID string) (int64, error) {
 	return s.engine.TriggerNow(ctx, jobID)
 }
 
+// CancelRun stops one in-flight run — see Engine.Cancel for what "stop"
+// actually does to the underlying query.
+func (s *Service) CancelRun(runID int64) error {
+	if s.engine == nil {
+		return errors.New("etl engine is not available")
+	}
+	return s.engine.Cancel(runID)
+}
+
+// ListRunningRuns lists every currently in-flight run across every job —
+// the admin UI's "what's running right now" view, joined with each run's
+// job name so the UI doesn't have to cross-reference ids itself. Plain raw
+// SQL (same pattern as ListDestTables/ListDestTableColumns above), not
+// NewSelect().Model(...) -- RunningJob is a join projection, not a model of
+// one real table.
+func (s *Service) ListRunningRuns(ctx context.Context) ([]RunningJob, error) {
+	var running []RunningJob
+	err := s.db.NewRaw(`
+		SELECT run.id, run.job_id, job.name AS job_name, run.started_at, run.rows_extracted, run.rows_loaded
+		FROM app.etl_job_runs run
+		JOIN app.etl_jobs job ON job.id = run.job_id
+		WHERE run.status = ?
+		ORDER BY run.started_at
+	`, RunStatusRunning).Scan(ctx, &running)
+	if err != nil {
+		return nil, err
+	}
+	return running, nil
+}
+
 func (s *Service) ListRuns(ctx context.Context, jobID string, limit int) ([]JobRun, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20

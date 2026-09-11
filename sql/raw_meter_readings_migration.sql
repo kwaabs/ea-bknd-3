@@ -45,16 +45,19 @@
 -- cast below rather than casting udis_id to bigint.
 --
 -- NOTE on non-unique udis_id (found 2026-09-11): app.meters.udis_id is
--- NOT guaranteed unique -- 16 values are each currently shared by exactly
--- 2 meter_number rows (all meter_type = 'DTX'). A plain INNER JOIN on
--- udis_id would fan out: one incoming reading for a shared udis_id
--- produces two output rows, crediting the same physical reading to two
--- different meter_numbers. Since it's not yet established whether that's
--- a legitimate one-device/two-meter_number relationship or a stale
--- duplicate in app.meters, the join below refuses to guess: it only
--- resolves udis_id values that currently map to exactly one meter_number,
--- and counts the rest as "ambiguous" (reported separately from
--- "unrecognized device") instead of inserting for either candidate.
+-- NOT guaranteed unique. Confirmed against UDIS_CH.M_METER (the master --
+-- one ASSET_NO per METER_ID, no fan-out there) that the collisions found
+-- so far are app.meters data corruption, not a real shared-device
+-- relationship -- see fix_udis_id_dtx_duplicates_202609.sql and
+-- refresh_meters_udis_id.sql. A plain INNER JOIN on udis_id would fan
+-- out: one incoming reading for a shared udis_id produces one output row
+-- per distinct meter_number sharing it. The join below refuses to guess:
+-- it only resolves udis_id values that currently map to exactly one
+-- DISTINCT meter_number (two app.meters ROWS agreeing on the same
+-- meter_number, a duplicate-row bug rather than a mapping ambiguity,
+-- still counts as resolved), and counts the rest as "ambiguous"
+-- (reported separately from "unrecognized device") instead of inserting
+-- for any candidate.
 --
 -- NOTE on query duration: a run of the old FME process against this same
 -- source (meter-filtered AND date-windowed) took 4h12m and still failed
@@ -128,23 +131,28 @@ BEGIN
       AND prod.data_item_id = t.data_item_id;
     GET DIAGNOSTICS v_deleted = ROW_COUNT;
 
-    -- Count temp rows whose udis_id maps to more than one meter_number --
-    -- these get dropped below rather than fanned out to every candidate
-    -- (see the non-unique udis_id note above). Reported separately from
-    -- "unrecognized device" so the two failure modes stay distinguishable.
+    -- Count temp rows whose udis_id maps to more than one DISTINCT
+    -- meter_number -- these get dropped below rather than fanned out to
+    -- every candidate (see the non-unique udis_id note above). Grouped on
+    -- DISTINCT meter_number, not row count: a udis_id with two app.meters
+    -- ROWS that happen to share the same meter_number (a duplicate-row
+    -- bug, not a mapping ambiguity -- both rows agree on the answer)
+    -- isn't actually ambiguous and shouldn't be dropped here. Reported
+    -- separately from "unrecognized device" so the two failure modes stay
+    -- distinguishable.
     SELECT count(*) INTO v_ambiguous
     FROM app.raw_meter_readings_temp t
     WHERE t.id::text IN (
         SELECT udis_id FROM app.meters
         WHERE udis_id IS NOT NULL
         GROUP BY udis_id
-        HAVING count(*) > 1
+        HAVING count(DISTINCT meter_number) > 1
     );
 
     -- 3. Insert temp data into production. meter_number resolved via
-    -- app.meters, restricted to udis_id values that currently map to
-    -- exactly one meter_number (see note above) -- unrecognized and
-    -- ambiguous devices are both dropped here; val cast guarded via
+    -- app.meters, restricted to udis_id values that currently resolve to
+    -- exactly one distinct meter_number (see note above) -- unrecognized
+    -- and ambiguous devices are both dropped here; val cast guarded via
     -- safe_numeric() instead of a bare ::double precision.
     INSERT INTO app.raw_meter_readings (meter_number, source_id, tv, data_item_id, val, tv_update)
     SELECT
@@ -160,7 +168,7 @@ BEGIN
         FROM app.meters
         WHERE udis_id IS NOT NULL
         GROUP BY udis_id
-        HAVING count(*) = 1
+        HAVING count(DISTINCT meter_number) = 1
     ) m ON m.udis_id = t.id::text;
     GET DIAGNOSTICS v_inserted = ROW_COUNT;
 

@@ -169,6 +169,13 @@ type JobRun struct {
 	RowsExtracted int64      `bun:"rows_extracted"      json:"rows_extracted"`
 	RowsLoaded    int64      `bun:"rows_loaded"         json:"rows_loaded"`
 	ErrorMessage  *string    `bun:"error_message"       json:"error_message"`
+	// QueryText is the actual query sent to the source for this run --
+	// {{WATERMARK}}/{{FILTER}} already substituted with the real values
+	// used, not job.SourceQuery's raw template. Written as soon as it's
+	// built, before execution, so it's visible even for a run still in
+	// flight. For a filtered job (several queries, one per chunk) this is
+	// whichever chunk's query was built most recently.
+	QueryText *string `bun:"query_text" json:"query_text"`
 }
 
 // RunningJob is one currently in-flight run, joined with its job's name —
@@ -181,6 +188,7 @@ type RunningJob struct {
 	StartedAt     time.Time `bun:"started_at"     json:"started_at"`
 	RowsExtracted int64     `bun:"rows_extracted" json:"rows_extracted"`
 	RowsLoaded    int64     `bun:"rows_loaded"    json:"rows_loaded"`
+	QueryText     *string   `bun:"query_text"     json:"query_text"`
 }
 
 // DestColumnInfo describes one column of a candidate destination table —

@@ -35,23 +35,40 @@ type RowSource interface {
 // per-source connection pool (see Engine's sourcePools).
 var httpClientForSources = &http.Client{Timeout: 2 * time.Minute}
 
+// recordQueryText persists the actual query/request about to be sent for
+// this run, {{WATERMARK}}/{{FILTER}} already substituted — written before
+// execution, not after, so it's visible even for a run that's still in
+// flight (or stuck) rather than only discoverable once it finishes. Best
+// effort: a failure here is a diagnostics-visibility gap, not a reason to
+// fail the actual extract, so callers ignore the error.
+func recordQueryText(ctx context.Context, destDB *bun.DB, runID int64, queryText string) error {
+	_, err := destDB.NewUpdate().
+		Model((*JobRun)(nil)).
+		Set("query_text = ?", queryText).
+		Where("id = ?", runID).
+		Exec(ctx)
+	return err
+}
+
 // openPlainRowSource builds and opens the RowSource for one plain
 // (non-filtered) run — a SQL query for the three DB kinds, or a paginated
 // HTTP request for KindHTTPAPI. lastWatermark is only consulted for an
 // incremental job; buildQuery/buildHTTPRequest both no-op past it for
 // full_refresh.
-func openPlainRowSource(ctx context.Context, conn *sourceConn, job Job, lastWatermark string) (RowSource, error) {
+func openPlainRowSource(ctx context.Context, destDB *bun.DB, runID int64, conn *sourceConn, job Job, lastWatermark string) (RowSource, error) {
 	if conn.HTTP != nil {
 		path, values, err := buildHTTPRequest(job, lastWatermark)
 		if err != nil {
 			return nil, err
 		}
+		_ = recordQueryText(ctx, destDB, runID, path+"?"+values.Encode())
 		return newHTTPRowSource(ctx, httpClientForSources, *conn.HTTP, job, path, values), nil
 	}
 	query, err := buildQuery(job, lastWatermark)
 	if err != nil {
 		return nil, err
 	}
+	_ = recordQueryText(ctx, destDB, runID, query)
 	return conn.SQL.QueryContext(ctx, query)
 }
 
@@ -60,18 +77,20 @@ func openPlainRowSource(ctx context.Context, conn *sourceConn, job Job, lastWate
 // already formatted for the target context (SQL IN(...) literal list, or
 // a plain comma-separated query-param value) by the caller, per source
 // kind.
-func openFilteredRowSource(ctx context.Context, conn *sourceConn, job Job, filterLiteral string) (RowSource, error) {
+func openFilteredRowSource(ctx context.Context, destDB *bun.DB, runID int64, conn *sourceConn, job Job, filterLiteral string) (RowSource, error) {
 	if conn.HTTP != nil {
 		path, values, err := buildFilteredHTTPRequest(job, filterLiteral)
 		if err != nil {
 			return nil, err
 		}
+		_ = recordQueryText(ctx, destDB, runID, path+"?"+values.Encode())
 		return newHTTPRowSource(ctx, httpClientForSources, *conn.HTTP, job, path, values), nil
 	}
 	query, err := buildFilteredQuery(job, filterLiteral)
 	if err != nil {
 		return nil, err
 	}
+	_ = recordQueryText(ctx, destDB, runID, query)
 	return conn.SQL.QueryContext(ctx, query)
 }
 
@@ -89,7 +108,7 @@ type runResult struct {
 // connection the caller (Engine) owns and reuses across runs of the same
 // source — runJob never closes it.
 func runJob(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job, runID int64) (runResult, error) {
-	result, runErr := extractAndLoad(ctx, destDB, conn, job)
+	result, runErr := extractAndLoad(ctx, destDB, conn, job, runID)
 
 	// finishRun always uses a fresh, uncancelled context, never ctx itself —
 	// ctx may already be Done by the time we get here (a timeout, or an
@@ -125,7 +144,7 @@ func runJob(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job, runI
 // case) or once per chunk of job.FilterQuery's results (see
 // extractAndLoadFiltered) — and delegates the actual streaming
 // extract+batch+load work to runExtractQuery either way.
-func extractAndLoad(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job) (runResult, error) {
+func extractAndLoad(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job, runID int64) (runResult, error) {
 	var result runResult
 
 	wmIdx := -1
@@ -140,7 +159,7 @@ func extractAndLoad(ctx context.Context, destDB *bun.DB, conn *sourceConn, job J
 		// JobInput.validate requires mode=full_refresh whenever
 		// filter_query is set, so wmIdx is always -1 here — see
 		// extractAndLoadFiltered's comment for why the two don't mix.
-		return extractAndLoadFiltered(ctx, destDB, conn, job)
+		return extractAndLoadFiltered(ctx, destDB, conn, job, runID)
 	}
 
 	lastWatermark := defaultWatermarkFor(job)
@@ -154,7 +173,7 @@ func extractAndLoad(ctx context.Context, destDB *bun.DB, conn *sourceConn, job J
 		}
 	}
 
-	rows, err := openPlainRowSource(ctx, conn, job, lastWatermark)
+	rows, err := openPlainRowSource(ctx, destDB, runID, conn, job, lastWatermark)
 	if err != nil {
 		return result, err
 	}
@@ -183,7 +202,7 @@ const defaultFilterBatchSize = 1000
 // them — advancing per-chunk risks skipping rows a later chunk should
 // still have picked up. Rather than get that subtly wrong, incremental +
 // filtered just isn't supported.
-func extractAndLoadFiltered(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job) (runResult, error) {
+func extractAndLoadFiltered(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job, runID int64) (runResult, error) {
 	var total runResult
 
 	values, err := loadFilterValues(ctx, destDB, *job.FilterQuery)
@@ -218,7 +237,7 @@ func extractAndLoadFiltered(ctx context.Context, destDB *bun.DB, conn *sourceCon
 		if err != nil {
 			return total, fmt.Errorf("etl: job %q: %w", job.Name, err)
 		}
-		rows, err := openFilteredRowSource(ctx, conn, job, literal)
+		rows, err := openFilteredRowSource(ctx, destDB, runID, conn, job, literal)
 		if err != nil {
 			return total, err
 		}

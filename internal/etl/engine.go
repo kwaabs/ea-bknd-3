@@ -390,7 +390,7 @@ func (e *Engine) TriggerNow(ctx context.Context, jobID string) (int64, error) {
 		defer e.unregisterRunCancel(runID)
 		defer cancel()
 
-		result, runErr := extractAndLoad(runCtx, e.db, sourceDB, *job)
+		result, runErr := extractAndLoad(runCtx, e.db, sourceDB, *job, runID)
 		status := RunStatusSuccess
 		errMsg := ""
 		if runErr != nil {

@@ -30,19 +30,31 @@
 --   3. meter_number was a straight passthrough from the temp table. The
 --      ETL job can never populate it (an Oracle-only query has no access
 --      to app.meters), so it landed NULL and stayed NULL through this
---      script too. Fixed with an INNER JOIN to app.meters on udis_id --
---      only readings from a device app.meters actually recognizes get
---      kept. This is also the ETL job's stand-in for the meter filter the
---      old FME process applied at the Oracle end (via a live M_METER
---      lookup): the ETL job itself pulls every device's rows (Oracle has
---      no index on RD_METER_READS.ID to filter by there without risking
---      the query-duration failure documented below), and this INNER JOIN
---      is where unrecognized-device rows actually get dropped instead --
---      same end result in app.raw_meter_readings, no Oracle-side cost.
+--      script too. Fixed with a join to app.meters on udis_id -- only
+--      readings from a device app.meters actually recognizes get kept.
+--      This is also the ETL job's stand-in for the meter filter the old
+--      FME process applied at the Oracle end (via a live M_METER lookup):
+--      the ETL job itself pulls every device's rows (Oracle has no index
+--      on RD_METER_READS.ID to filter by there without risking the
+--      query-duration failure documented below), and this join is where
+--      unrecognized-device rows actually get dropped instead -- same end
+--      result in app.raw_meter_readings, no Oracle-side cost.
 --
 -- ASSUMPTION: app.meters.udis_id is text (confirmed against
 -- internal/meters/model.go's `UdisID *string`), hence the `t.id::text`
 -- cast below rather than casting udis_id to bigint.
+--
+-- NOTE on non-unique udis_id (found 2026-09-11): app.meters.udis_id is
+-- NOT guaranteed unique -- 16 values are each currently shared by exactly
+-- 2 meter_number rows (all meter_type = 'DTX'). A plain INNER JOIN on
+-- udis_id would fan out: one incoming reading for a shared udis_id
+-- produces two output rows, crediting the same physical reading to two
+-- different meter_numbers. Since it's not yet established whether that's
+-- a legitimate one-device/two-meter_number relationship or a stale
+-- duplicate in app.meters, the join below refuses to guess: it only
+-- resolves udis_id values that currently map to exactly one meter_number,
+-- and counts the rest as "ambiguous" (reported separately from
+-- "unrecognized device") instead of inserting for either candidate.
 --
 -- NOTE on query duration: a run of the old FME process against this same
 -- source (meter-filtered AND date-windowed) took 4h12m and still failed
@@ -81,13 +93,14 @@ RETURNS void
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    v_min_tv    bigint;
-    v_max_tv    bigint;
-    v_min_date  date;
-    v_max_date  date;
-    v_deleted   int;
-    v_inserted  int;
-    v_extracted int;
+    v_min_tv      bigint;
+    v_max_tv      bigint;
+    v_min_date    date;
+    v_max_date    date;
+    v_deleted     int;
+    v_inserted    int;
+    v_extracted   int;
+    v_ambiguous   int;
 BEGIN
     -- 1. Range of data in the temp table -- still needed for the daily-
     -- aggregate recalc below, which legitimately does span every meter
@@ -115,10 +128,24 @@ BEGIN
       AND prod.data_item_id = t.data_item_id;
     GET DIAGNOSTICS v_deleted = ROW_COUNT;
 
+    -- Count temp rows whose udis_id maps to more than one meter_number --
+    -- these get dropped below rather than fanned out to every candidate
+    -- (see the non-unique udis_id note above). Reported separately from
+    -- "unrecognized device" so the two failure modes stay distinguishable.
+    SELECT count(*) INTO v_ambiguous
+    FROM app.raw_meter_readings_temp t
+    WHERE t.id::text IN (
+        SELECT udis_id FROM app.meters
+        WHERE udis_id IS NOT NULL
+        GROUP BY udis_id
+        HAVING count(*) > 1
+    );
+
     -- 3. Insert temp data into production. meter_number resolved via
-    -- app.meters (INNER JOIN -- unrecognized devices are dropped here,
-    -- see comment above); val cast guarded via safe_numeric() instead of
-    -- a bare ::double precision.
+    -- app.meters, restricted to udis_id values that currently map to
+    -- exactly one meter_number (see note above) -- unrecognized and
+    -- ambiguous devices are both dropped here; val cast guarded via
+    -- safe_numeric() instead of a bare ::double precision.
     INSERT INTO app.raw_meter_readings (meter_number, source_id, tv, data_item_id, val, tv_update)
     SELECT
         m.meter_number,
@@ -128,7 +155,13 @@ BEGIN
         app.safe_numeric(t.val)::double precision,
         t.tv_update
     FROM app.raw_meter_readings_temp t
-    INNER JOIN app.meters m ON m.udis_id = t.id::text;
+    INNER JOIN (
+        SELECT udis_id, min(meter_number) AS meter_number
+        FROM app.meters
+        WHERE udis_id IS NOT NULL
+        GROUP BY udis_id
+        HAVING count(*) = 1
+    ) m ON m.udis_id = t.id::text;
     GET DIAGNOSTICS v_inserted = ROW_COUNT;
 
     -- 4. Clear existing daily aggregates for the affected date range.
@@ -138,13 +171,14 @@ BEGIN
     -- 5. Recalculate daily consumption for the migrated date range.
     PERFORM app.calculate_daily_consumption(v_min_date, v_max_date, true);
 
-    -- v_extracted - v_inserted is how many rows this run dropped as
-    -- unrecognized devices -- worth watching: a number that's usually
-    -- near zero but suddenly grows is a signal udis_id has drifted again
-    -- (see refresh_meters_udis_id.sql) or a genuinely new device showed
-    -- up in Oracle before app.meters knew about it.
-    RAISE NOTICE 'migrate_raw_meter_readings: % row(s) extracted, % row(s) replaced, % row(s) inserted (% dropped, unrecognized device), dates % to %',
-        v_extracted, v_deleted, v_inserted, v_extracted - v_inserted, v_min_date, v_max_date;
+    -- v_extracted - v_inserted is how many rows this run dropped, split
+    -- into ambiguous (udis_id shared by >1 meter_number, see note above)
+    -- and unrecognized (udis_id not in app.meters at all) -- either count
+    -- usually sits near zero; a sudden jump is a signal app.meters needs
+    -- attention (drifted udis_id -- see refresh_meters_udis_id.sql -- or
+    -- genuinely new/duplicated meter rows).
+    RAISE NOTICE 'migrate_raw_meter_readings: % row(s) extracted, % row(s) replaced, % row(s) inserted (% dropped: % ambiguous udis_id, % unrecognized device), dates % to %',
+        v_extracted, v_deleted, v_inserted, v_extracted - v_inserted, v_ambiguous, (v_extracted - v_inserted - v_ambiguous), v_min_date, v_max_date;
 
     -- 6. Clear the temp table now that it's been migrated.
     TRUNCATE app.raw_meter_readings_temp;

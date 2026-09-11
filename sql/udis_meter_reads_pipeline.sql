@@ -17,12 +17,33 @@
 -- resync procedures — see internal/etl/models.go's package doc comment):
 --   ETL job "udis_meter_reads" (mode=incremental, watermark on TV_UPDATE,
 --   see this file's bottom comment for the exact job config) appends new
---   rows to app.udis_meter_reads_raw on its own schedule
+--   rows to staging.udis_meter_reads_raw on its own schedule
 --     -> SELECT app.udis_meter_reads_merge(ARRAY['BSP']);
 --        (or whichever meter type(s) you actually want merged this run —
 --        see the function's own comment)
 --        run right after each ETL run of that job, same pairing as the
 --        MMS resync functions already run after each MMS load.
+--
+-- The landing buffer lives in its own `staging` schema, not `app` — it's
+-- pure transient ETL holding (truncated every merge, never queried
+-- directly by anything else), so it's kept out of the schema that holds
+-- the app's actual tables. The merge function itself, and the real
+-- app.udis_meter_reads table it writes into, stay in `app`.
+CREATE SCHEMA IF NOT EXISTS staging;
+
+-- Moves the landing table into staging if an earlier apply of this
+-- script already created it under app (data, indexes, and all — Postgres
+-- ALTER TABLE ... SET SCHEMA carries both) — a no-op on a fresh database,
+-- where the CREATE TABLE IF NOT EXISTS below creates it under staging
+-- directly.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_tables WHERE schemaname = 'app' AND tablename = 'udis_meter_reads_raw'
+    ) THEN
+        ALTER TABLE app.udis_meter_reads_raw SET SCHEMA staging;
+    END IF;
+END $$;
 
 -- Pure landing buffer — every meter's rows for the tracked
 -- DATA_ITEM_IDs, before any meter-type filtering. id is text (not
@@ -30,7 +51,7 @@
 -- with no cast, and so a malformed/unexpected ID value can never fail
 -- the whole batch load the way a numeric column with a CHECK constraint
 -- could.
-CREATE TABLE IF NOT EXISTS app.udis_meter_reads_raw (
+CREATE TABLE IF NOT EXISTS staging.udis_meter_reads_raw (
     id            text NOT NULL,   -- Oracle RD_METER_READS.ID -> app.meters.udis_id
     tv            bigint NOT NULL, -- reading interval timestamp, unix epoch seconds
     data_item_id  text NOT NULL,   -- which measurement (e.g. '00100000')
@@ -39,7 +60,7 @@ CREATE TABLE IF NOT EXISTS app.udis_meter_reads_raw (
     loaded_at     timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_udis_meter_reads_raw_id ON app.udis_meter_reads_raw (id);
+CREATE INDEX IF NOT EXISTS idx_udis_meter_reads_raw_id ON staging.udis_meter_reads_raw (id);
 
 -- app.meters.udis_id had no index — needed for the merge join below to
 -- stay fast regardless of how large app.meters grows.
@@ -116,7 +137,7 @@ BEGIN
     INSERT INTO app.udis_meter_reads (meter_number, meter_type, udis_id, tv, data_item_id, val, tv_update)
     SELECT m.meter_number, m.meter_type, raw.id, raw.tv, raw.data_item_id,
            app.safe_numeric(raw.val), raw.tv_update
-    FROM app.udis_meter_reads_raw raw
+    FROM staging.udis_meter_reads_raw raw
     JOIN app.meters m ON m.udis_id = raw.id
     WHERE p_meter_types IS NULL OR m.meter_type = ANY(p_meter_types)
     ON CONFLICT (udis_id, tv, data_item_id) DO UPDATE
@@ -129,7 +150,7 @@ BEGIN
     GET DIAGNOSTICS v_matched = ROW_COUNT;
     RAISE NOTICE 'udis_meter_reads_merge(%): % row(s) merged into app.udis_meter_reads', p_meter_types, v_matched;
 
-    TRUNCATE app.udis_meter_reads_raw;
+    TRUNCATE staging.udis_meter_reads_raw;
 END;
 $$;
 
@@ -152,7 +173,9 @@ $$;
 --       AND rmr.TV_UPDATE > {{WATERMARK}}
 --     ORDER BY rmr.TV_UPDATE
 --
---   Destination: app.udis_meter_reads_raw
+--   Destination: staging.udis_meter_reads_raw (create the "staging"
+--   schema first by running this file — the wizard's destination-table
+--   picker only lists schemas/tables that already exist)
 --   Column mapping (source -> dest, in this order):
 --     ID -> id, TV -> tv, DATA_ITEM_ID -> data_item_id, VAL -> val, TV_UPDATE -> tv_update
 --   Conflict columns: none — plain append, TRUNCATEd by the merge above

@@ -238,6 +238,34 @@ func (h *Handler) RunJobNow(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusAccepted, map[string]any{"run_id": runID})
 }
 
+func (h *Handler) CancelRun(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	runID, err := strconv.ParseInt(chi.URLParam(r, "runId"), 10, 64)
+	if err != nil {
+		httpx.JSON(w, http.StatusBadRequest, "invalid run id")
+		return
+	}
+	if err := h.service.CancelRun(runID); err != nil {
+		writeServiceErr(w, h.logr, "failed to cancel etl run", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) ListRunningRuns(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	running, err := h.service.ListRunningRuns(r.Context())
+	if err != nil {
+		writeServiceErr(w, h.logr, "failed to list running etl runs", err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"data": running})
+}
+
 func (h *Handler) ListJobRuns(w http.ResponseWriter, r *http.Request) {
 	if !h.requireNotifyEmail(w, r) {
 		return

@@ -81,27 +81,41 @@ type runResult struct {
 	RowsLoaded    int64
 }
 
-// runJob executes one job end-to-end: opens a run-history row, extracts +
-// batch-loads (see extractAndLoad), and closes out that row as
-// success/failed. conn is a pooled connection the caller (Engine) owns
-// and reuses across runs of the same source — runJob never closes it.
-func runJob(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job) (runResult, error) {
-	var result runResult
-
-	runID, err := insertRunStarted(ctx, destDB, job.ID)
-	if err != nil {
-		return result, fmt.Errorf("etl: record run start for job %q: %w", job.Name, err)
-	}
-
+// runJob executes one job end-to-end: extracts + batch-loads (see
+// extractAndLoad) against the already-open run-history row runID (the
+// caller creates it up front via insertRunStarted, before this even starts,
+// so it can register that run's cancel func against the same id), and
+// closes that row out as success/failed/cancelled. conn is a pooled
+// connection the caller (Engine) owns and reuses across runs of the same
+// source — runJob never closes it.
+func runJob(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job, runID int64) (runResult, error) {
 	result, runErr := extractAndLoad(ctx, destDB, conn, job)
 
+	// finishRun always uses a fresh, uncancelled context, never ctx itself —
+	// ctx may already be Done by the time we get here (a timeout, or an
+	// operator's Stop), and an already-Done context can't be used to record
+	// that fact: the write would fail immediately too, leaving the run
+	// stuck at status='running' forever — indistinguishable from a crashed
+	// server, which is the one case this package's own docs say nothing
+	// reconciles automatically.
+	finishCtx := context.Background()
+
 	if runErr != nil {
-		if finishErr := finishRun(ctx, destDB, runID, RunStatusFailed, result, runErr.Error()); finishErr != nil {
+		status := RunStatusFailed
+		// Distinguishes an operator's Stop (ctx cancelled directly) from a
+		// real failure or a timeout (ctx.Err() would be
+		// context.DeadlineExceeded instead) -- Cancel and the timeout share
+		// the same context.CancelFunc, but only an explicit Cancel() call
+		// produces context.Canceled specifically.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			status = RunStatusCancelled
+		}
+		if finishErr := finishRun(finishCtx, destDB, runID, status, result, runErr.Error()); finishErr != nil {
 			return result, fmt.Errorf("%w (also failed to record failure: %v)", runErr, finishErr)
 		}
 		return result, runErr
 	}
-	if err := finishRun(ctx, destDB, runID, RunStatusSuccess, result, ""); err != nil {
+	if err := finishRun(finishCtx, destDB, runID, RunStatusSuccess, result, ""); err != nil {
 		return result, fmt.Errorf("etl: record run success for job %q: %w", job.Name, err)
 	}
 	return result, nil

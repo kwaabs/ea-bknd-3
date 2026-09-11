@@ -732,7 +732,7 @@ func (s *Service) CancelRun(runID int64) error {
 func (s *Service) ListRunningRuns(ctx context.Context) ([]RunningJob, error) {
 	var running []RunningJob
 	err := s.db.NewRaw(`
-		SELECT run.id, run.job_id, job.name AS job_name, run.started_at, run.rows_extracted, run.rows_loaded
+		SELECT run.id, run.job_id, job.name AS job_name, run.started_at, run.rows_extracted, run.rows_loaded, run.query_text
 		FROM app.etl_job_runs run
 		JOIN app.etl_jobs job ON job.id = run.job_id
 		WHERE run.status = ?

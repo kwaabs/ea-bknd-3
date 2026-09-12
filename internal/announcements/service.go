@@ -13,9 +13,11 @@ import (
 )
 
 var (
-	ErrForbidden  = errors.New("forbidden")
-	ErrNotFound   = errors.New("not found")
-	ErrBadRequest = errors.New("bad request")
+	ErrForbidden   = errors.New("forbidden")
+	ErrNotFound    = errors.New("not found")
+	ErrBadRequest  = errors.New("bad request")
+	ErrInvalidKind = errors.New("invalid kind")
+	ErrBodyTooLong = errors.New("body too long")
 )
 
 type Service struct {
@@ -58,6 +60,26 @@ func (s *Service) Create(ctx context.Context, req *CreateAnnouncementRequest) (*
 	if body == "" || email == "" {
 		return nil, ErrBadRequest
 	}
+	kind := strings.TrimSpace(req.Kind)
+	if kind == "" {
+		kind = KindRegular
+	}
+	if kind != KindRegular && kind != KindSpecial {
+		return nil, ErrInvalidKind
+	}
+	// Regular bodies are plain text shown on a single-line marquee ticker.
+	// Special bodies are serialized TipTap JSON (see the frontend's
+	// RichAnnouncementEditor) — inherently bulkier than the visible text
+	// it represents, so it gets a much higher cap; RICH_ANNOUNCEMENT_MAX_CHARS
+	// there caps the visible text, this caps the stored payload as a
+	// backstop against a client bypassing that client-side check entirely.
+	maxLen := 500
+	if kind == KindSpecial {
+		maxLen = 20000
+	}
+	if len(body) > maxLen {
+		return nil, ErrBodyTooLong
+	}
 	allowed, err := s.IsAllowed(ctx, email)
 	if err != nil {
 		return nil, err
@@ -72,6 +94,7 @@ func (s *Service) Create(ctx context.Context, req *CreateAnnouncementRequest) (*
 		Body:        body,
 		AuthorEmail: email,
 		AuthorName:  req.AuthorName,
+		Kind:        kind,
 		Active:      true,
 		CreatedAt:   now,
 		UpdatedAt:   now,

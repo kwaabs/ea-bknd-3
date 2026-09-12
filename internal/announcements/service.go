@@ -13,9 +13,10 @@ import (
 )
 
 var (
-	ErrForbidden  = errors.New("forbidden")
-	ErrNotFound   = errors.New("not found")
-	ErrBadRequest = errors.New("bad request")
+	ErrForbidden   = errors.New("forbidden")
+	ErrNotFound    = errors.New("not found")
+	ErrBadRequest  = errors.New("bad request")
+	ErrInvalidKind = errors.New("invalid kind")
 )
 
 type Service struct {
@@ -58,6 +59,13 @@ func (s *Service) Create(ctx context.Context, req *CreateAnnouncementRequest) (*
 	if body == "" || email == "" {
 		return nil, ErrBadRequest
 	}
+	kind := strings.TrimSpace(req.Kind)
+	if kind == "" {
+		kind = KindRegular
+	}
+	if kind != KindRegular && kind != KindSpecial {
+		return nil, ErrInvalidKind
+	}
 	allowed, err := s.IsAllowed(ctx, email)
 	if err != nil {
 		return nil, err
@@ -72,6 +80,7 @@ func (s *Service) Create(ctx context.Context, req *CreateAnnouncementRequest) (*
 		Body:        body,
 		AuthorEmail: email,
 		AuthorName:  req.AuthorName,
+		Kind:        kind,
 		Active:      true,
 		CreatedAt:   now,
 		UpdatedAt:   now,

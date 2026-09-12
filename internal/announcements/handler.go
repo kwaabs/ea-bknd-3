@@ -59,6 +59,13 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		if errors.Is(err, ErrInvalidKind) {
+			httpx.JSON(w, http.StatusBadRequest, MessageResponse{
+				Success: false,
+				Message: "kind must be \"regular\" or \"special\"",
+			})
+			return
+		}
 		if errors.Is(err, ErrForbidden) {
 			httpx.JSON(w, http.StatusForbidden, MessageResponse{
 				Success: false,

@@ -359,7 +359,7 @@ func TestFormatFilterLiteral(t *testing.T) {
 
 func TestBuildFilteredQuery(t *testing.T) {
 	job := Job{Name: "j", SourceQuery: "SELECT id FROM t WHERE id IN ({{FILTER}})"}
-	got, err := buildFilteredQuery(job, "'A', 'B'")
+	got, err := buildFilteredQuery(job, "'A', 'B'", "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -369,8 +369,33 @@ func TestBuildFilteredQuery(t *testing.T) {
 	}
 
 	missingToken := Job{Name: "j", SourceQuery: "SELECT id FROM t"}
-	if _, err := buildFilteredQuery(missingToken, "'A'"); err == nil {
+	if _, err := buildFilteredQuery(missingToken, "'A'", "", ""); err == nil {
 		t.Fatal("expected error when source_query has no {{FILTER}} token, got none")
+	}
+}
+
+func TestBuildFilteredQuery_CursorPagination(t *testing.T) {
+	job := Job{
+		Name:          "j",
+		SourceQuery:   "SELECT id, tv FROM t WHERE id IN ({{FILTER}}) AND (id > {{CURSOR_COL1}} OR (id = {{CURSOR_COL1}} AND tv > {{CURSOR_COL2}})) ORDER BY id, tv FETCH FIRST 10000 ROWS ONLY",
+		CursorColumns: []string{"id", "tv"},
+	}
+	got, err := buildFilteredQuery(job, "1, 2", "100", "200")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "SELECT id, tv FROM t WHERE id IN (1, 2) AND (id > 100 OR (id = 100 AND tv > 200)) ORDER BY id, tv FETCH FIRST 10000 ROWS ONLY"
+	if got != want {
+		t.Errorf("buildFilteredQuery = %q, want %q", got, want)
+	}
+
+	missingCursorTokens := Job{
+		Name:          "j",
+		SourceQuery:   "SELECT id FROM t WHERE id IN ({{FILTER}})",
+		CursorColumns: []string{"id", "tv"},
+	}
+	if _, err := buildFilteredQuery(missingCursorTokens, "1", "100", "200"); err == nil {
+		t.Fatal("expected error when cursor_columns is set but source_query has no CURSOR_COL tokens, got none")
 	}
 }
 

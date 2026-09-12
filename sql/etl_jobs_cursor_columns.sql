@@ -1,0 +1,11 @@
+-- Adds keyset-pagination-within-a-filter-chunk support to the ETL engine.
+-- See internal/etl/models.go's Job.CursorColumns comment for the full
+-- design: when set (exactly 2 dest_columns, e.g. ['id','tv']), the
+-- engine re-runs a filter_query chunk's source_query repeatedly,
+-- substituting {{CURSOR_COL1}}/{{CURSOR_COL2}} with the previous page's
+-- last row each time, until a page comes back empty -- instead of one
+-- unbounded query per chunk. Built because a single 800-meter chunk's
+-- full result set, pulled from an 18B-row Oracle table in one
+-- unbounded round-trip, is too large/slow to fetch before anything can
+-- be written to the destination.
+ALTER TABLE app.etl_jobs ADD COLUMN IF NOT EXISTS cursor_columns text[] NULL;

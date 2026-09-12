@@ -122,6 +122,26 @@ type Job struct {
 	FilterQuery     *string `bun:"filter_query"      json:"filter_query"`
 	FilterBatchSize *int    `bun:"filter_batch_size" json:"filter_batch_size"`
 
+	// CursorColumns, when set, names exactly two dest_columns (in the same
+	// order as {{CURSOR_COL1}}/{{CURSOR_COL2}} appear in SourceQuery) used
+	// for keyset pagination *within* each filter_query chunk: rather than
+	// one unbounded query per chunk, the engine re-runs source_query
+	// repeatedly for the same chunk, each time substituting the previous
+	// page's last row's values for {{CURSOR_COL1}}/{{CURSOR_COL2}}, until a
+	// page comes back with zero rows. Exists for sources where even one
+	// chunk's full result set is too large/slow to fetch in a single
+	// unbounded round-trip (an 18B-row Oracle table, in the case this was
+	// built for) — pagination bounds each individual query (via the
+	// source_query's own FETCH FIRST/LIMIT) and writes each page to the
+	// destination as it arrives, rather than waiting for one chunk's
+	// entire result set before writing anything.
+	//
+	// Only valid alongside filter_query (mode=full_refresh). Both named
+	// columns must be numeric — rendered as raw unquoted literals via
+	// watermarkToString, same convention as WatermarkInteger — since
+	// cursorSentinel ("-1") assumes both start below any real value.
+	CursorColumns []string `bun:"cursor_columns,array" json:"cursor_columns"`
+
 	// SourceFields, RecordsPath, PageSize are only meaningful when this
 	// job's source is Kind == KindHTTPAPI — see httpsource.go.
 	//

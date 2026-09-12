@@ -9,6 +9,15 @@ import (
 
 const watermarkToken = "{{WATERMARK}}"
 const filterToken = "{{FILTER}}"
+const cursorCol1Token = "{{CURSOR_COL1}}"
+const cursorCol2Token = "{{CURSOR_COL2}}"
+
+// cursorSentinel is substituted for a filter chunk's very first page,
+// before any row of it has been seen. Both cursor columns must be
+// numeric (id/tv-style: a device id and a Unix-epoch second count, both
+// always positive in this dataset) for -1 to be a safe "less than
+// anything real" starting point — see Job.CursorColumns' comment.
+const cursorSentinel = "-1"
 
 // defaultWatermark is substituted for a job's very first run, before
 // app.etl_job_state has a row for it — a deliberately-old-but-real lower
@@ -144,9 +153,23 @@ func formatFilterLiteral(values []interface{}) (string, error) {
 // "don't silently ignore it" discipline buildQuery applies to
 // {{WATERMARK}} — since JobInput.validate already guarantees this for any
 // saved job, a missing token here means the job row itself is malformed.
-func buildFilteredQuery(job Job, filterLiteral string) (string, error) {
+//
+// When job.CursorColumns is set, this is one page of a keyset-paginated
+// chunk (see extractAndLoadFiltered's comment for why that exists) —
+// cursor1/cursor2 are also substituted for {{CURSOR_COL1}}/{{CURSOR_COL2}},
+// same "must actually be referenced" discipline.
+func buildFilteredQuery(job Job, filterLiteral, cursor1, cursor2 string) (string, error) {
 	if !strings.Contains(job.SourceQuery, filterToken) {
 		return "", fmt.Errorf("etl: job %q has filter_query set but its source_query never references %s", job.Name, filterToken)
 	}
-	return strings.ReplaceAll(job.SourceQuery, filterToken, filterLiteral), nil
+	query := strings.ReplaceAll(job.SourceQuery, filterToken, filterLiteral)
+
+	if len(job.CursorColumns) == 2 {
+		if !strings.Contains(job.SourceQuery, cursorCol1Token) || !strings.Contains(job.SourceQuery, cursorCol2Token) {
+			return "", fmt.Errorf("etl: job %q has cursor_columns set but its source_query doesn't reference both %s and %s", job.Name, cursorCol1Token, cursorCol2Token)
+		}
+		query = strings.ReplaceAll(query, cursorCol1Token, cursor1)
+		query = strings.ReplaceAll(query, cursorCol2Token, cursor2)
+	}
+	return query, nil
 }

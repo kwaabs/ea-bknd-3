@@ -72,12 +72,13 @@ func openPlainRowSource(ctx context.Context, destDB *bun.DB, runID int64, conn *
 	return conn.SQL.QueryContext(ctx, query)
 }
 
-// openFilteredRowSource is openPlainRowSource's counterpart for one
-// filter_query chunk (see extractAndLoadFiltered) — filterLiteral is
-// already formatted for the target context (SQL IN(...) literal list, or
-// a plain comma-separated query-param value) by the caller, per source
-// kind.
-func openFilteredRowSource(ctx context.Context, destDB *bun.DB, runID int64, conn *sourceConn, job Job, filterLiteral string) (RowSource, error) {
+// openFilteredRowSource is openPlainRowSource's counterpart for one page
+// of one filter_query chunk (see extractAndLoadFiltered) — filterLiteral
+// is already formatted for the target context (SQL IN(...) literal list,
+// or a plain comma-separated query-param value) by the caller, per source
+// kind. cursor1/cursor2 are only meaningful for the SQL kinds, when
+// job.CursorColumns is set — see buildFilteredQuery.
+func openFilteredRowSource(ctx context.Context, destDB *bun.DB, runID int64, conn *sourceConn, job Job, filterLiteral, cursor1, cursor2 string) (RowSource, error) {
 	if conn.HTTP != nil {
 		path, values, err := buildFilteredHTTPRequest(job, filterLiteral)
 		if err != nil {
@@ -86,7 +87,7 @@ func openFilteredRowSource(ctx context.Context, destDB *bun.DB, runID int64, con
 		_ = recordQueryText(ctx, destDB, runID, path+"?"+values.Encode())
 		return newHTTPRowSource(ctx, httpClientForSources, *conn.HTTP, job, path, values), nil
 	}
-	query, err := buildFilteredQuery(job, filterLiteral)
+	query, err := buildFilteredQuery(job, filterLiteral, cursor1, cursor2)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +179,8 @@ func extractAndLoad(ctx context.Context, destDB *bun.DB, conn *sourceConn, job J
 		return result, err
 	}
 
-	return runExtractQuery(ctx, destDB, job, rows, wmIdx)
+	result, _, _, err = runExtractQuery(ctx, destDB, job, rows, wmIdx, -1, -1)
+	return result, err
 }
 
 const defaultFilterBatchSize = 1000
@@ -202,6 +204,14 @@ const defaultFilterBatchSize = 1000
 // them — advancing per-chunk risks skipping rows a later chunk should
 // still have picked up. Rather than get that subtly wrong, incremental +
 // filtered just isn't supported.
+//
+// When job.CursorColumns is set, each chunk isn't run as one unbounded
+// query — it's paginated (see runFilteredChunkPaginated): a page-sized
+// slice of that chunk's result set at a time, written to the destination
+// as each page arrives, re-querying with an advancing keyset cursor until
+// a page comes back empty. Built for sources where even one 800-key
+// chunk's full result set, against an 18B-row table, is too large to
+// fetch in a single round-trip before anything can be written.
 func extractAndLoadFiltered(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job, runID int64) (runResult, error) {
 	var total runResult
 
@@ -216,6 +226,18 @@ func extractAndLoadFiltered(ctx context.Context, destDB *bun.DB, conn *sourceCon
 	batchSize := defaultFilterBatchSize
 	if job.FilterBatchSize != nil && *job.FilterBatchSize > 0 {
 		batchSize = *job.FilterBatchSize
+	}
+
+	cursorIdx1, cursorIdx2 := -1, -1
+	if len(job.CursorColumns) == 2 {
+		if conn.HTTP != nil {
+			return total, fmt.Errorf("etl: job %q: cursor_columns pagination isn't supported for http_api sources", job.Name)
+		}
+		cursorIdx1 = indexOf(job.DestColumns, job.CursorColumns[0])
+		cursorIdx2 = indexOf(job.DestColumns, job.CursorColumns[1])
+		if cursorIdx1 == -1 || cursorIdx2 == -1 {
+			return total, fmt.Errorf("etl: job %q: cursor_columns %v not found in dest_columns", job.Name, job.CursorColumns)
+		}
 	}
 
 	for start := 0; start < len(values); start += batchSize {
@@ -237,18 +259,59 @@ func extractAndLoadFiltered(ctx context.Context, destDB *bun.DB, conn *sourceCon
 		if err != nil {
 			return total, fmt.Errorf("etl: job %q: %w", job.Name, err)
 		}
-		rows, err := openFilteredRowSource(ctx, destDB, runID, conn, job, literal)
-		if err != nil {
-			return total, err
+
+		if cursorIdx1 == -1 {
+			rows, err := openFilteredRowSource(ctx, destDB, runID, conn, job, literal, "", "")
+			if err != nil {
+				return total, err
+			}
+			chunkResult, _, _, err := runExtractQuery(ctx, destDB, job, rows, -1, -1, -1)
+			total.RowsExtracted += chunkResult.RowsExtracted
+			total.RowsLoaded += chunkResult.RowsLoaded
+			if err != nil {
+				return total, fmt.Errorf("etl: job %q: filter batch [%d,%d): %w", job.Name, start, end, err)
+			}
+			continue
 		}
-		chunkResult, err := runExtractQuery(ctx, destDB, job, rows, -1)
-		total.RowsExtracted += chunkResult.RowsExtracted
-		total.RowsLoaded += chunkResult.RowsLoaded
+
+		pageResult, err := runFilteredChunkPaginated(ctx, destDB, runID, conn, job, literal, cursorIdx1, cursorIdx2)
+		total.RowsExtracted += pageResult.RowsExtracted
+		total.RowsLoaded += pageResult.RowsLoaded
 		if err != nil {
 			return total, fmt.Errorf("etl: job %q: filter batch [%d,%d): %w", job.Name, start, end, err)
 		}
 	}
 	return total, nil
+}
+
+// runFilteredChunkPaginated keeps re-running source_query for one
+// filter_query chunk, each time substituting {{CURSOR_COL1}}/
+// {{CURSOR_COL2}} with the previous page's last row's values (starting
+// from cursorSentinel, "before" any real row), until a page returns zero
+// rows — meaning this chunk's full result set (however large) has been
+// retrieved, in source_query's own bounded page size (its own FETCH
+// FIRST/LIMIT — the engine doesn't impose one), written to the
+// destination page by page rather than all at once.
+func runFilteredChunkPaginated(ctx context.Context, destDB *bun.DB, runID int64, conn *sourceConn, job Job, filterLiteral string, cursorIdx1, cursorIdx2 int) (runResult, error) {
+	var total runResult
+	cursor1, cursor2 := cursorSentinel, cursorSentinel
+
+	for {
+		rows, err := openFilteredRowSource(ctx, destDB, runID, conn, job, filterLiteral, cursor1, cursor2)
+		if err != nil {
+			return total, err
+		}
+		pageResult, lastCursor1, lastCursor2, err := runExtractQuery(ctx, destDB, job, rows, -1, cursorIdx1, cursorIdx2)
+		total.RowsExtracted += pageResult.RowsExtracted
+		total.RowsLoaded += pageResult.RowsLoaded
+		if err != nil {
+			return total, fmt.Errorf("page after cursor (%s, %s): %w", cursor1, cursor2, err)
+		}
+		if pageResult.RowsExtracted == 0 {
+			return total, nil // this chunk is fully drained
+		}
+		cursor1, cursor2 = lastCursor1, lastCursor2
+	}
 }
 
 // loadFilterValues runs a job's filter_query against destDB (this app
@@ -298,25 +361,33 @@ func loadFilterValues(ctx context.Context, destDB *bun.DB, filterQuery string) (
 // app.migration_checkpoints elsewhere in this repo). A failure partway
 // through leaves every already-committed batch in place and the
 // watermark (if any) advanced up to it. Shared by the plain single-query
-// path and the filtered path (extractAndLoadFiltered calls this once per
-// filter chunk) — everything past "here is the already-open row source"
-// is identical either way, regardless of source kind.
-func runExtractQuery(ctx context.Context, destDB *bun.DB, job Job, rows RowSource, wmIdx int) (runResult, error) {
-	var result runResult
+// path and the filtered path (extractAndLoadFiltered/
+// runFilteredChunkPaginated call this once per filter chunk or page) —
+// everything past "here is the already-open row source" is identical
+// either way, regardless of source kind.
+//
+// cursorIdx1/cursorIdx2 (both -1 to disable) name two DestColumns
+// positions to track independently of wmIdx's per-batch watermark
+// advancement: lastCursor1/lastCursor2 return the very last row scanned
+// across the whole call's worth of rows (not per-batch), for
+// runFilteredChunkPaginated's caller to seed the next page's keyset —
+// empty strings if zero rows were scanned.
+func runExtractQuery(ctx context.Context, destDB *bun.DB, job Job, rows RowSource, wmIdx int, cursorIdx1, cursorIdx2 int) (result runResult, lastCursor1, lastCursor2 string, err error) {
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return result, fmt.Errorf("etl: read result columns for job %q: %w", job.Name, err)
+		return result, "", "", fmt.Errorf("etl: read result columns for job %q: %w", job.Name, err)
 	}
 	if len(cols) != len(job.DestColumns) {
-		return result, fmt.Errorf(
+		return result, "", "", fmt.Errorf(
 			"etl: job %q: source_query returns %d columns but dest_columns has %d",
 			job.Name, len(cols), len(job.DestColumns),
 		)
 	}
 
 	batch := make([][]interface{}, 0, job.BatchSize)
+	var lastRow []interface{}
 
 	flush := func() error {
 		if len(batch) == 0 {
@@ -350,28 +421,42 @@ func runExtractQuery(ctx context.Context, destDB *bun.DB, job Job, rows RowSourc
 			scanArgs[i] = &values[i]
 		}
 		if err := rows.Scan(scanArgs...); err != nil {
-			return result, fmt.Errorf("etl: scan row for job %q: %w", job.Name, err)
+			return result, "", "", fmt.Errorf("etl: scan row for job %q: %w", job.Name, err)
 		}
 		for i := range values {
 			values[i] = normalizeValue(values[i])
 		}
 		batch = append(batch, values)
 		result.RowsExtracted++
+		if cursorIdx1 >= 0 {
+			lastRow = values
+		}
 
 		if len(batch) >= job.BatchSize {
 			if err := flush(); err != nil {
-				return result, err
+				return result, "", "", err
 			}
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return result, fmt.Errorf("etl: reading rows for job %q: %w", job.Name, err)
+		return result, "", "", fmt.Errorf("etl: reading rows for job %q: %w", job.Name, err)
 	}
 	if err := flush(); err != nil {
-		return result, err
+		return result, "", "", err
 	}
 
-	return result, nil
+	if lastRow != nil {
+		lastCursor1, err = watermarkToString(lastRow[cursorIdx1])
+		if err != nil {
+			return result, "", "", fmt.Errorf("etl: job %q: cursor column %d: %w", job.Name, cursorIdx1, err)
+		}
+		lastCursor2, err = watermarkToString(lastRow[cursorIdx2])
+		if err != nil {
+			return result, "", "", fmt.Errorf("etl: job %q: cursor column %d: %w", job.Name, cursorIdx2, err)
+		}
+	}
+
+	return result, lastCursor1, lastCursor2, nil
 }
 
 // loadBatch inserts one batch into the destination table and (for an

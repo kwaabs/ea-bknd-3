@@ -399,6 +399,26 @@ func TestBuildFilteredQuery_CursorPagination(t *testing.T) {
 	}
 }
 
+func TestBuildRangeQuery(t *testing.T) {
+	job := Job{
+		Name:        "j",
+		SourceQuery: "SELECT id FROM t WHERE tv >= {{RANGE_START}} AND tv < {{RANGE_END}}",
+	}
+	got, err := buildRangeQuery(job, 1786838400, 1786924800)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "SELECT id FROM t WHERE tv >= 1786838400 AND tv < 1786924800"
+	if got != want {
+		t.Errorf("buildRangeQuery = %q, want %q", got, want)
+	}
+
+	missingTokens := Job{Name: "j", SourceQuery: "SELECT id FROM t"}
+	if _, err := buildRangeQuery(missingTokens, 1, 2); err == nil {
+		t.Fatal("expected error when source_query has no RANGE_START/RANGE_END tokens, got none")
+	}
+}
+
 func TestJobInputValidate_FilterQueryRequiresFullRefresh(t *testing.T) {
 	wt := WatermarkTimestamp
 	col := "updated_at"

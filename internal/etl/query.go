@@ -11,6 +11,8 @@ const watermarkToken = "{{WATERMARK}}"
 const filterToken = "{{FILTER}}"
 const cursorCol1Token = "{{CURSOR_COL1}}"
 const cursorCol2Token = "{{CURSOR_COL2}}"
+const rangeStartToken = "{{RANGE_START}}"
+const rangeEndToken = "{{RANGE_END}}"
 
 // cursorSentinel is substituted for a filter chunk's very first page,
 // before any row of it has been seen. Both cursor columns must be
@@ -171,5 +173,27 @@ func buildFilteredQuery(job Job, filterLiteral, cursor1, cursor2 string) (string
 		query = strings.ReplaceAll(query, cursorCol1Token, cursor1)
 		query = strings.ReplaceAll(query, cursorCol2Token, cursor2)
 	}
+	return query, nil
+}
+
+// buildRangeQuery substitutes this run's date-slice bounds for
+// {{RANGE_START}}/{{RANGE_END}} into job.SourceQuery, both rendered as
+// raw integer (epoch-seconds) literals — same "not a bind parameter"
+// reasoning as formatWatermarkLiteral, same "must actually be
+// referenced" discipline as buildFilteredQuery. Deliberately independent
+// of the existing incremental/{{WATERMARK}} mechanism: that one can
+// never combine with filter_query (see extractAndLoadFiltered's
+// comment), but a job needing both a meter filter AND a bounded date
+// window per run (rather than one unbounded full_refresh scan) needs
+// exactly that combination — this is what makes it possible, without
+// touching the incremental/WatermarkColumn machinery at all. See
+// applyDateRangeWindow for where rangeStart/rangeEnd come from and how
+// the resulting checkpoint gets persisted.
+func buildRangeQuery(job Job, rangeStart, rangeEnd int64) (string, error) {
+	if !strings.Contains(job.SourceQuery, rangeStartToken) || !strings.Contains(job.SourceQuery, rangeEndToken) {
+		return "", fmt.Errorf("etl: job %q has range_step_seconds set but its source_query doesn't reference both %s and %s", job.Name, rangeStartToken, rangeEndToken)
+	}
+	query := strings.ReplaceAll(job.SourceQuery, rangeStartToken, strconv.FormatInt(rangeStart, 10))
+	query = strings.ReplaceAll(query, rangeEndToken, strconv.FormatInt(rangeEnd, 10))
 	return query, nil
 }

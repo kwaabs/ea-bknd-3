@@ -142,6 +142,29 @@ type Job struct {
 	// cursorSentinel ("-1") assumes both start below any real value.
 	CursorColumns []string `bun:"cursor_columns,array" json:"cursor_columns"`
 
+	// RangeStepSeconds, when set, gives a full_refresh + filter_query job
+	// a persisted date-window checkpoint — independent of, and usable
+	// alongside, filter_query (which the existing mode=incremental
+	// watermark explicitly cannot combine with, see
+	// extractAndLoadFiltered's comment). Each run substitutes
+	// {{RANGE_START}}/{{RANGE_END}} in source_query with [checkpoint,
+	// checkpoint+RangeStepSeconds), capped at "now" — bounding every
+	// run's date window to a fixed, small slice (e.g. one day) instead
+	// of scanning everything since RangeStart in one shot, which for a
+	// large source table can be too expensive to complete at all. The
+	// checkpoint only advances to that run's RANGE_START end value if the
+	// ENTIRE run (every filter chunk, every page within each chunk)
+	// succeeds — a failed/partial run leaves it untouched, so the next
+	// trigger safely retries the exact same slice rather than silently
+	// skipping it.
+	RangeStepSeconds *int `bun:"range_step_seconds" json:"range_step_seconds"`
+	// RangeStart seeds the very first run's {{RANGE_START}}, before
+	// app.etl_job_state has a checkpoint row for this job yet. Stored as
+	// text (like JobState.LastWatermark) even though it's always parsed
+	// as an integer, for the same reason WatermarkType's values are text —
+	// one consistent column type regardless of value kind.
+	RangeStart *string `bun:"range_start" json:"range_start"`
+
 	// SourceFields, RecordsPath, PageSize are only meaningful when this
 	// job's source is Kind == KindHTTPAPI — see httpsource.go.
 	//

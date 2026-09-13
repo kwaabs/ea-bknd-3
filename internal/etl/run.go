@@ -156,11 +156,36 @@ func extractAndLoad(ctx context.Context, destDB *bun.DB, conn *sourceConn, job J
 		}
 	}
 
+	// Bake this run's date-slice bounds into a working copy of job's
+	// source_query before deciding plain vs. filtered below — see
+	// Job.RangeStepSeconds' comment. Independent of wmIdx/mode=incremental
+	// above; deliberately usable together with filter_query.
+	var rangeEnd int64
+	hasRange := job.RangeStepSeconds != nil
+	if hasRange {
+		var err error
+		job, rangeEnd, err = applyDateRangeWindow(ctx, destDB, job)
+		if err != nil {
+			return result, err
+		}
+	}
+
 	if job.FilterQuery != nil && strings.TrimSpace(*job.FilterQuery) != "" {
 		// JobInput.validate requires mode=full_refresh whenever
 		// filter_query is set, so wmIdx is always -1 here — see
 		// extractAndLoadFiltered's comment for why the two don't mix.
-		return extractAndLoadFiltered(ctx, destDB, conn, job, runID)
+		result, err := extractAndLoadFiltered(ctx, destDB, conn, job, runID)
+		if hasRange && err == nil {
+			// Only now, with every filter chunk and every page within
+			// each chunk having succeeded, is it safe to move the
+			// checkpoint forward — a failed/partial run leaves it
+			// exactly where it was, so the next trigger retries this
+			// same slice instead of silently skipping the unfinished part.
+			if saveErr := saveRangeCheckpoint(ctx, destDB, job.ID, rangeEnd); saveErr != nil {
+				return result, fmt.Errorf("etl: job %q: succeeded but failed to persist range checkpoint: %w", job.Name, saveErr)
+			}
+		}
+		return result, err
 	}
 
 	lastWatermark := defaultWatermarkFor(job)
@@ -181,6 +206,63 @@ func extractAndLoad(ctx context.Context, destDB *bun.DB, conn *sourceConn, job J
 
 	result, _, _, err = runExtractQuery(ctx, destDB, job, rows, wmIdx, -1, -1)
 	return result, err
+}
+
+// applyDateRangeWindow loads this job's persisted range checkpoint from
+// app.etl_job_state — reused as-is regardless of job.Mode, since this is
+// independent of the mode=incremental/{{WATERMARK}} mechanism (see
+// Job.RangeStepSeconds' comment) — defaulting to job.RangeStart on a
+// job's very first run (no state row yet), computes this run's slice
+// upper bound (checkpoint + job.RangeStepSeconds, capped at now), and
+// returns a copy of job with {{RANGE_START}}/{{RANGE_END}} already
+// substituted into SourceQuery plus the rangeEnd value the caller should
+// persist as the new checkpoint once the whole run succeeds.
+func applyDateRangeWindow(ctx context.Context, destDB *bun.DB, job Job) (Job, int64, error) {
+	var rangeStart int64
+
+	state, err := loadJobState(ctx, destDB, job.ID)
+	if err != nil {
+		return job, 0, err
+	}
+	switch {
+	case state != nil && state.LastWatermark != nil:
+		rangeStart, err = strconv.ParseInt(*state.LastWatermark, 10, 64)
+		if err != nil {
+			return job, 0, fmt.Errorf("etl: job %q: stored range checkpoint %q is not a valid integer: %w", job.Name, *state.LastWatermark, err)
+		}
+	case job.RangeStart != nil:
+		rangeStart, err = strconv.ParseInt(*job.RangeStart, 10, 64)
+		if err != nil {
+			return job, 0, fmt.Errorf("etl: job %q: range_start %q is not a valid integer: %w", job.Name, *job.RangeStart, err)
+		}
+	}
+
+	rangeEnd := rangeStart + int64(*job.RangeStepSeconds)
+	if now := time.Now().Unix(); rangeEnd > now {
+		rangeEnd = now
+	}
+
+	query, err := buildRangeQuery(job, rangeStart, rangeEnd)
+	if err != nil {
+		return job, 0, err
+	}
+	job.SourceQuery = query
+	return job, rangeEnd, nil
+}
+
+// saveRangeCheckpoint persists rangeEnd as this job's new range
+// checkpoint — same upsert shape loadBatch uses for the incremental
+// watermark, just called once per run (after the whole run succeeds)
+// rather than once per batch.
+func saveRangeCheckpoint(ctx context.Context, destDB *bun.DB, jobID string, rangeEnd int64) error {
+	wm := strconv.FormatInt(rangeEnd, 10)
+	_, err := destDB.NewInsert().
+		Model(&JobState{JobID: jobID, LastWatermark: &wm}).
+		On("CONFLICT (job_id) DO UPDATE").
+		Set("last_watermark = EXCLUDED.last_watermark").
+		Set("updated_at = now()").
+		Exec(ctx)
+	return err
 }
 
 const defaultFilterBatchSize = 1000

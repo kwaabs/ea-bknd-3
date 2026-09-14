@@ -156,50 +156,17 @@ func extractAndLoad(ctx context.Context, destDB *bun.DB, conn *sourceConn, job J
 		}
 	}
 
-	// A ranged job (Job.RangeStepSeconds set) walks forward one date-slice
-	// at a time, checkpointing after each slice succeeds, until it
-	// catches up to the present — see Job.RangeStepSeconds' comment.
-	// template keeps job's original {{RANGE_START}}/{{RANGE_END}} tokens
-	// intact across iterations: applyDateRangeWindow substitutes into a
-	// fresh copy each time, since the substituted copy from the previous
-	// iteration no longer contains those tokens to substitute into again.
-	if job.RangeStepSeconds != nil {
-		template := job
-		for {
-			windowed, rangeEnd, caughtUp, err := applyDateRangeWindow(ctx, destDB, template)
-			if err != nil {
-				return result, err
-			}
-
-			var sliceResult runResult
-			if windowed.FilterQuery != nil && strings.TrimSpace(*windowed.FilterQuery) != "" {
-				// JobInput.validate requires mode=full_refresh whenever
-				// filter_query is set, so wmIdx is always -1 here — see
-				// extractAndLoadFiltered's comment for why the two
-				// don't mix.
-				sliceResult, err = extractAndLoadFiltered(ctx, destDB, conn, windowed, runID)
-			} else {
-				sliceResult, err = extractAndLoadPlainOnce(ctx, destDB, conn, windowed, runID, wmIdx)
-			}
-			result.RowsExtracted += sliceResult.RowsExtracted
-			result.RowsLoaded += sliceResult.RowsLoaded
-			if err != nil {
-				return result, err
-			}
-
-			// Only now, with the whole slice (every filter chunk and
-			// every page within each chunk, for a filtered job) having
-			// succeeded, is it safe to move the checkpoint forward — a
-			// failed slice leaves it exactly where it was and stops the
-			// run here, so the next trigger retries that same slice
-			// instead of silently skipping it, while every slice
-			// completed earlier in this same run stays committed.
-			if saveErr := saveRangeCheckpoint(ctx, destDB, template.ID, rangeEnd); saveErr != nil {
-				return result, fmt.Errorf("etl: job %q: succeeded but failed to persist range checkpoint: %w", job.Name, saveErr)
-			}
-			if caughtUp {
-				return result, nil
-			}
+	// Bake this run's date-slice bounds into a working copy of job's
+	// source_query before deciding plain vs. filtered below — see
+	// Job.RangeStepSeconds' comment. Independent of wmIdx/mode=incremental
+	// above; deliberately usable together with filter_query.
+	var rangeEnd int64
+	hasRange := job.RangeStepSeconds != nil
+	if hasRange {
+		var err error
+		job, rangeEnd, err = applyDateRangeWindow(ctx, destDB, job)
+		if err != nil {
+			return result, err
 		}
 	}
 
@@ -207,23 +174,25 @@ func extractAndLoad(ctx context.Context, destDB *bun.DB, conn *sourceConn, job J
 		// JobInput.validate requires mode=full_refresh whenever
 		// filter_query is set, so wmIdx is always -1 here — see
 		// extractAndLoadFiltered's comment for why the two don't mix.
-		return extractAndLoadFiltered(ctx, destDB, conn, job, runID)
+		result, err := extractAndLoadFiltered(ctx, destDB, conn, job, runID)
+		if hasRange && err == nil {
+			// Only now, with every filter chunk and every page within
+			// each chunk having succeeded, is it safe to move the
+			// checkpoint forward — a failed/partial run leaves it
+			// exactly where it was, so the next trigger retries this
+			// same slice instead of silently skipping the unfinished part.
+			if saveErr := saveRangeCheckpoint(ctx, destDB, job.ID, rangeEnd); saveErr != nil {
+				return result, fmt.Errorf("etl: job %q: succeeded but failed to persist range checkpoint: %w", job.Name, saveErr)
+			}
+		}
+		return result, err
 	}
 
-	return extractAndLoadPlainOnce(ctx, destDB, conn, job, runID, wmIdx)
-}
-
-// extractAndLoadPlainOnce runs job's source_query as-is (watermark
-// substituted for an incremental job) and loads its results — one query,
-// no filter chunking, no date-range slicing. Shared by extractAndLoad's
-// direct call (job.RangeStepSeconds unset) and its date-range loop above
-// (one call per slice, for a ranged job with no filter_query).
-func extractAndLoadPlainOnce(ctx context.Context, destDB *bun.DB, conn *sourceConn, job Job, runID int64, wmIdx int) (runResult, error) {
 	lastWatermark := defaultWatermarkFor(job)
 	if job.Mode == ModeIncremental {
 		state, err := loadJobState(ctx, destDB, job.ID)
 		if err != nil {
-			return runResult{}, err
+			return result, err
 		}
 		if state != nil && state.LastWatermark != nil {
 			lastWatermark = *state.LastWatermark
@@ -232,10 +201,10 @@ func extractAndLoadPlainOnce(ctx context.Context, destDB *bun.DB, conn *sourceCo
 
 	rows, err := openPlainRowSource(ctx, destDB, runID, conn, job, lastWatermark)
 	if err != nil {
-		return runResult{}, err
+		return result, err
 	}
 
-	result, _, _, err := runExtractQuery(ctx, destDB, job, rows, wmIdx, -1, -1)
+	result, _, _, err = runExtractQuery(ctx, destDB, job, rows, wmIdx, -1, -1)
 	return result, err
 }
 
@@ -243,47 +212,42 @@ func extractAndLoadPlainOnce(ctx context.Context, destDB *bun.DB, conn *sourceCo
 // app.etl_job_state — reused as-is regardless of job.Mode, since this is
 // independent of the mode=incremental/{{WATERMARK}} mechanism (see
 // Job.RangeStepSeconds' comment) — defaulting to job.RangeStart on a
-// job's very first slice (no state row yet), computes this slice's upper
-// bound (checkpoint + job.RangeStepSeconds, capped at now), and returns a
-// copy of job with {{RANGE_START}}/{{RANGE_END}} already substituted into
-// SourceQuery, the rangeEnd value the caller should persist as the new
-// checkpoint once this slice succeeds, and caughtUp — true once this
-// slice's uncapped upper bound reaches or passes "now", telling the
-// caller's loop (extractAndLoad) this is the last slice to run before
-// stopping rather than continuing to the next one.
-func applyDateRangeWindow(ctx context.Context, destDB *bun.DB, job Job) (Job, int64, bool, error) {
+// job's very first run (no state row yet), computes this run's slice
+// upper bound (checkpoint + job.RangeStepSeconds, capped at now), and
+// returns a copy of job with {{RANGE_START}}/{{RANGE_END}} already
+// substituted into SourceQuery plus the rangeEnd value the caller should
+// persist as the new checkpoint once the whole run succeeds.
+func applyDateRangeWindow(ctx context.Context, destDB *bun.DB, job Job) (Job, int64, error) {
 	var rangeStart int64
 
 	state, err := loadJobState(ctx, destDB, job.ID)
 	if err != nil {
-		return job, 0, false, err
+		return job, 0, err
 	}
 	switch {
 	case state != nil && state.LastWatermark != nil:
 		rangeStart, err = strconv.ParseInt(*state.LastWatermark, 10, 64)
 		if err != nil {
-			return job, 0, false, fmt.Errorf("etl: job %q: stored range checkpoint %q is not a valid integer: %w", job.Name, *state.LastWatermark, err)
+			return job, 0, fmt.Errorf("etl: job %q: stored range checkpoint %q is not a valid integer: %w", job.Name, *state.LastWatermark, err)
 		}
 	case job.RangeStart != nil:
 		rangeStart, err = strconv.ParseInt(*job.RangeStart, 10, 64)
 		if err != nil {
-			return job, 0, false, fmt.Errorf("etl: job %q: range_start %q is not a valid integer: %w", job.Name, *job.RangeStart, err)
+			return job, 0, fmt.Errorf("etl: job %q: range_start %q is not a valid integer: %w", job.Name, *job.RangeStart, err)
 		}
 	}
 
 	rangeEnd := rangeStart + int64(*job.RangeStepSeconds)
-	now := time.Now().Unix()
-	caughtUp := rangeEnd >= now
-	if rangeEnd > now {
+	if now := time.Now().Unix(); rangeEnd > now {
 		rangeEnd = now
 	}
 
 	query, err := buildRangeQuery(job, rangeStart, rangeEnd)
 	if err != nil {
-		return job, 0, false, err
+		return job, 0, err
 	}
 	job.SourceQuery = query
-	return job, rangeEnd, caughtUp, nil
+	return job, rangeEnd, nil
 }
 
 // saveRangeCheckpoint persists rangeEnd as this job's new range

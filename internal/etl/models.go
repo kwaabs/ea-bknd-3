@@ -146,19 +146,17 @@ type Job struct {
 	// a persisted date-window checkpoint — independent of, and usable
 	// alongside, filter_query (which the existing mode=incremental
 	// watermark explicitly cannot combine with, see
-	// extractAndLoadFiltered's comment). One run walks forward through
-	// as many [checkpoint, checkpoint+RangeStepSeconds) slices as it
-	// takes to catch up to "now" — not just one — substituting
-	// {{RANGE_START}}/{{RANGE_END}} in source_query fresh for each slice;
-	// bounding every individual slice to a fixed, small window (e.g. one
-	// day) instead of scanning everything since RangeStart at once, which
-	// for a large source table can be too expensive to complete at all.
-	// The checkpoint only advances past a given slice once that whole
-	// slice (every filter chunk, every page within each chunk) succeeds —
-	// a failed slice leaves it untouched and stops the run there, so the
-	// next trigger safely retries that exact slice rather than silently
-	// skipping it or losing the slices already completed earlier in the
-	// same run.
+	// extractAndLoadFiltered's comment). Each run substitutes
+	// {{RANGE_START}}/{{RANGE_END}} in source_query with [checkpoint,
+	// checkpoint+RangeStepSeconds), capped at "now" — bounding every
+	// run's date window to a fixed, small slice (e.g. one day) instead
+	// of scanning everything since RangeStart in one shot, which for a
+	// large source table can be too expensive to complete at all. The
+	// checkpoint only advances to that run's RANGE_START end value if the
+	// ENTIRE run (every filter chunk, every page within each chunk)
+	// succeeds — a failed/partial run leaves it untouched, so the next
+	// trigger safely retries the exact same slice rather than silently
+	// skipping it.
 	RangeStepSeconds *int `bun:"range_step_seconds" json:"range_step_seconds"`
 	// RangeStart seeds the very first run's {{RANGE_START}}, before
 	// app.etl_job_state has a checkpoint row for this job yet. Stored as

@@ -23,6 +23,7 @@ func Routes(db *bun.DB, notifyEmails *notifyemail.Service, log *zap.Logger, mw .
 
 	r.Get("/", h.ListActive)
 	r.Post("/", h.Create)
+	r.Put("/{id}", h.Update)
 	r.Delete("/{id}", h.SoftDelete)
 
 	return r

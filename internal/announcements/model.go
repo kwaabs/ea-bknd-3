@@ -44,6 +44,14 @@ type DeleteAnnouncementRequest struct {
 	AuthorEmail string `json:"author_email"`
 }
 
+// UpdateAnnouncementRequest edits an existing announcement's body only —
+// Kind isn't editable (an announcement doesn't change channel after
+// posting; delete and repost under the other kind instead).
+type UpdateAnnouncementRequest struct {
+	Body        string `json:"body"`
+	AuthorEmail string `json:"author_email"`
+}
+
 type ListResponse struct {
 	Success bool            `json:"success"`
 	Count   int             `json:"count"`

@@ -744,6 +744,30 @@ func (s *Service) ListRunningRuns(ctx context.Context) ([]RunningJob, error) {
 	return running, nil
 }
 
+// ListAllRuns lists runs across every job, most recent first — the admin
+// UI's Logs tab, a single cross-job view rather than having to open each
+// job's own Runs history separately. Same raw-SQL join-projection pattern
+// as ListRunningRuns, just every status/timestamp instead of only
+// currently-running ones.
+func (s *Service) ListAllRuns(ctx context.Context, limit int) ([]RunLog, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var logs []RunLog
+	err := s.db.NewRaw(`
+		SELECT run.id, run.job_id, job.name AS job_name, run.status, run.started_at, run.finished_at,
+		       run.rows_extracted, run.rows_loaded, run.error_message, run.query_text
+		FROM app.etl_job_runs run
+		JOIN app.etl_jobs job ON job.id = run.job_id
+		ORDER BY run.started_at DESC
+		LIMIT ?
+	`, limit).Scan(ctx, &logs)
+	if err != nil {
+		return nil, err
+	}
+	return logs, nil
+}
+
 func (s *Service) ListRuns(ctx context.Context, jobID string, limit int) ([]JobRun, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 20

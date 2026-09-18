@@ -13,6 +13,7 @@ import (
 	"bknd-3/internal/feedback"
 	"bknd-3/internal/feeders"
 	"bknd-3/internal/handlers"
+	"bknd-3/internal/holleyconsumption"
 	"bknd-3/internal/logger"
 	"bknd-3/internal/loginstats"
 	"bknd-3/internal/meters"
@@ -205,6 +206,13 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 				// available as opaque regionid/districtid codes (no name
 				// lookup exists yet) — see the package doc comment.
 				r.Mount("/pns-consumption", pnsconsumption.Routes(db, logr.Logger))
+				// Holley-ingested legacy consumption source
+				// (app.holley_consumption, loaded by the ETL job
+				// "holley-consumption-pull") — independent of every other
+				// source. Has a real date_time timestamp like PNS, so no
+				// billmonth-label resolution is needed; region/district are
+				// already human-readable names, unlike PNS's opaque codes.
+				r.Mount("/holley-consumption", holleyconsumption.Routes(db, logr.Logger))
 				// Canonical cross-source Prepaid/Postpaid totals — merges
 				// Zeus/MMS/BOT/BXC (and whatever's added next) server-side
 				// so every frontend consumer reads one number instead of

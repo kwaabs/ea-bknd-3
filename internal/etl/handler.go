@@ -266,6 +266,19 @@ func (h *Handler) ListRunningRuns(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"data": running})
 }
 
+func (h *Handler) ListAllRuns(w http.ResponseWriter, r *http.Request) {
+	if !h.requireNotifyEmail(w, r) {
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	logs, err := h.service.ListAllRuns(r.Context(), limit)
+	if err != nil {
+		writeServiceErr(w, h.logr, "failed to list etl run logs", err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"data": logs})
+}
+
 func (h *Handler) ListJobRuns(w http.ResponseWriter, r *http.Request) {
 	if !h.requireNotifyEmail(w, r) {
 		return

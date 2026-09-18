@@ -236,6 +236,25 @@ type RunningJob struct {
 	QueryText     *string   `bun:"query_text"     json:"query_text"`
 }
 
+// RunLog is one run of any job, past or present, joined with its job's
+// name — the admin UI's cross-job Logs tab, not one job's own history
+// (see Service.ListAllRuns). Unlike RunningJob (only in-flight runs, a
+// narrower live-status view), this covers every status and both
+// timestamps, since a log is read after the fact at least as often as
+// while something is still running.
+type RunLog struct {
+	RunID         int64      `bun:"id"             json:"run_id"`
+	JobID         string     `bun:"job_id"         json:"job_id"`
+	JobName       string     `bun:"job_name"       json:"job_name"`
+	Status        RunStatus  `bun:"status"         json:"status"`
+	StartedAt     time.Time  `bun:"started_at"     json:"started_at"`
+	FinishedAt    *time.Time `bun:"finished_at"    json:"finished_at"`
+	RowsExtracted int64      `bun:"rows_extracted" json:"rows_extracted"`
+	RowsLoaded    int64      `bun:"rows_loaded"    json:"rows_loaded"`
+	ErrorMessage  *string    `bun:"error_message"  json:"error_message"`
+	QueryText     *string    `bun:"query_text"     json:"query_text"`
+}
+
 // DestColumnInfo describes one column of a candidate destination table —
 // read straight from information_schema.columns (see
 // Service.ListDestTableColumns), not a bun model of its own table, so it's

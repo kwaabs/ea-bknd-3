@@ -272,6 +272,7 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 			r.Get("/jobs/{id}/runs", etlHandler.ListJobRuns)
 			r.Get("/jobs/{id}/state", etlHandler.GetJobState)
 
+			r.Get("/runs", etlHandler.ListAllRuns)
 			r.Get("/runs/running", etlHandler.ListRunningRuns)
 			r.Post("/runs/{runId}/cancel", etlHandler.CancelRun)
 

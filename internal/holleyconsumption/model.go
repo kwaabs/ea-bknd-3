@@ -5,10 +5,17 @@
 // pnsconsumption: this table has a real date_time TIMESTAMP column (not a
 // free-text billmonth label), so date-range filtering is a plain SQL range
 // on date_time (see dbx.DateRange in service.go) — no billmonth-parsing
-// dance needed. region/district here are already human-readable names
-// (not opaque codes like PNS's regionid/districtid), stored as plain
-// varchar (not bpchar), so no trim() is needed either, unlike
-// botconsumption's blank-padded region column.
+// dance needed.
+//
+// district here is already a human-readable name, stored as plain varchar
+// (not bpchar), so no trim() is needed, unlike botconsumption's
+// blank-padded region column. region, however, is stored as a bare region
+// CODE (e.g. "09"), not a name — service.go resolves it to a real name via
+// a join against app.dbo_ecg_operational_regions_and_district_boundaries_10_7_25
+// (see regionExpr in service.go), falling back to the raw code for any
+// value that table doesn't recognize. Every Region field below (Reading,
+// AggregateRow, and FilterParams.Region — which filters against the
+// resolved name, not the raw code) reflects that resolution.
 package holleyconsumption
 
 import "time"

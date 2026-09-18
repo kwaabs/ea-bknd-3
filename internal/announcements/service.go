@@ -2,6 +2,7 @@ package announcements
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"time"
@@ -105,6 +106,56 @@ func (s *Service) Create(ctx context.Context, req *CreateAnnouncementRequest) (*
 		return nil, err
 	}
 	return row, nil
+}
+
+// Update edits an existing, still-active announcement's body — same
+// notify-email allowlist gate as Create/SoftDelete, and the same
+// kind-based length cap as Create (regular vs. special), read off the
+// existing row since Kind itself isn't editable.
+func (s *Service) Update(ctx context.Context, id uuid.UUID, req *UpdateAnnouncementRequest) (*Announcement, error) {
+	body := strings.TrimSpace(req.Body)
+	email := strings.TrimSpace(strings.ToLower(req.AuthorEmail))
+	if body == "" || email == "" {
+		return nil, ErrBadRequest
+	}
+	allowed, err := s.IsAllowed(ctx, email)
+	if err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, ErrForbidden
+	}
+
+	var existing Announcement
+	err = s.db.NewSelect().Model(&existing).Where("id = ? AND active = TRUE", id).Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	maxLen := 500
+	if existing.Kind == KindSpecial {
+		maxLen = 20000
+	}
+	if len(body) > maxLen {
+		return nil, ErrBodyTooLong
+	}
+
+	now := time.Now().UTC()
+	_, err = s.db.NewUpdate().
+		Model((*Announcement)(nil)).
+		Set("body = ?", body).
+		Set("updated_at = ?", now).
+		Where("id = ? AND active = TRUE", id).
+		Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+	existing.Body = body
+	existing.UpdatedAt = now
+	return &existing, nil
 }
 
 func (s *Service) SoftDelete(ctx context.Context, id uuid.UUID, email string) error {

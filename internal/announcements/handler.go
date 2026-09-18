@@ -94,6 +94,70 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Update handles PUT /api/v1/announcements/{id} — notify-email allowlist only.
+func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.JSON(w, http.StatusBadRequest, MessageResponse{
+			Success: false,
+			Message: "Invalid announcement id",
+		})
+		return
+	}
+
+	var req UpdateAnnouncementRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpx.JSON(w, http.StatusBadRequest, MessageResponse{
+			Success: false,
+			Message: "Invalid request body",
+		})
+		return
+	}
+
+	row, err := h.service.Update(r.Context(), id, &req)
+	if err != nil {
+		if errors.Is(err, ErrBadRequest) {
+			httpx.JSON(w, http.StatusBadRequest, MessageResponse{
+				Success: false,
+				Message: "body and author_email are required",
+			})
+			return
+		}
+		if errors.Is(err, ErrBodyTooLong) {
+			httpx.JSON(w, http.StatusBadRequest, MessageResponse{
+				Success: false,
+				Message: "Announcement body is too long",
+			})
+			return
+		}
+		if errors.Is(err, ErrForbidden) {
+			httpx.JSON(w, http.StatusForbidden, MessageResponse{
+				Success: false,
+				Message: "You are not allowed to edit announcements",
+			})
+			return
+		}
+		if errors.Is(err, ErrNotFound) {
+			httpx.JSON(w, http.StatusNotFound, MessageResponse{
+				Success: false,
+				Message: "Announcement not found",
+			})
+			return
+		}
+		h.logr.Error("Update announcement failed", zap.Error(err))
+		httpx.JSON(w, http.StatusInternalServerError, MessageResponse{
+			Success: false,
+			Message: "Failed to update announcement",
+		})
+		return
+	}
+
+	httpx.JSON(w, http.StatusOK, SingleResponse{
+		Success: true,
+		Data:    row,
+	})
+}
+
 // SoftDelete handles DELETE /api/v1/announcements/{id} — notify-email allowlist only.
 func (h *Handler) SoftDelete(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))

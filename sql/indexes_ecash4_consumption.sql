@@ -29,14 +29,18 @@ CREATE INDEX IF NOT EXISTS idx_ecash4_consumption_period_date
     ON app.ecash4_consumption (period_date);
 
 -- The %search% LIKE across customer_name/meter_serial/spn can never use a
--- btree index. pg_trgm GIN indexes make substring search index-assisted:
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- btree index. pg_trgm GIN indexes make substring search index-assisted.
+-- pg_trgm is installed in the `app` schema on this database (confirmed via
+-- pg_extension/pg_namespace), not `public` — the operator class is
+-- schema-qualified below so this doesn't depend on `app` being on
+-- whatever session's search_path happens to run this file.
+CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA app;
 CREATE INDEX IF NOT EXISTS idx_ecash4_consumption_trgm_customer_name
-    ON app.ecash4_consumption USING gin (lower(customer_name) gin_trgm_ops);
+    ON app.ecash4_consumption USING gin (lower(customer_name) app.gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_ecash4_consumption_trgm_meter_serial
-    ON app.ecash4_consumption USING gin (lower(meter_serial) gin_trgm_ops);
+    ON app.ecash4_consumption USING gin (lower(meter_serial) app.gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_ecash4_consumption_trgm_spn
-    ON app.ecash4_consumption USING gin (lower(spn) gin_trgm_ops);
+    ON app.ecash4_consumption USING gin (lower(spn) app.gin_trgm_ops);
 
 -- The default sort for /detail (region, district, customer_name,
 -- meter_serial). A matching composite index lets Postgres serve deep

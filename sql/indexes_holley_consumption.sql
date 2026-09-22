@@ -28,14 +28,19 @@ CREATE INDEX IF NOT EXISTS idx_holley_consumption_date_time
     ON app.holley_consumption (date_time);
 
 -- The %search% LIKE across customer_name/meter_no/customer_no can never use
--- a btree index. pg_trgm GIN indexes make substring search index-assisted:
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- a btree index. pg_trgm GIN indexes make substring search index-assisted.
+-- pg_trgm is installed in the `app` schema on this database (confirmed via
+-- pg_extension/pg_namespace while debugging the same index file for
+-- ecash4_consumption), not `public` — the operator class is
+-- schema-qualified below so this doesn't depend on `app` being on
+-- whatever session's search_path happens to run this file.
+CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA app;
 CREATE INDEX IF NOT EXISTS idx_holley_consumption_trgm_customer_name
-    ON app.holley_consumption USING gin (lower(customer_name) gin_trgm_ops);
+    ON app.holley_consumption USING gin (lower(customer_name) app.gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_holley_consumption_trgm_meter_no
-    ON app.holley_consumption USING gin (lower(meter_no) gin_trgm_ops);
+    ON app.holley_consumption USING gin (lower(meter_no) app.gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_holley_consumption_trgm_customer_no
-    ON app.holley_consumption USING gin (lower(customer_no) gin_trgm_ops);
+    ON app.holley_consumption USING gin (lower(customer_no) app.gin_trgm_ops);
 
 -- The default sort for /detail (region, district, customer_name, meter_no).
 -- A matching composite index lets Postgres serve deep pagination without a

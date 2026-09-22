@@ -9,6 +9,7 @@ import (
 	"bknd-3/internal/cache"
 	"bknd-3/internal/comments"
 	"bknd-3/internal/config"
+	"bknd-3/internal/ecash4consumption"
 	"bknd-3/internal/etl"
 	"bknd-3/internal/feedback"
 	"bknd-3/internal/feeders"
@@ -213,6 +214,16 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 				// billmonth-label resolution is needed; region/district are
 				// already human-readable names, unlike PNS's opaque codes.
 				r.Mount("/holley-consumption", holleyconsumption.Routes(db, logr.Logger))
+				// ECASH 4-ingested legacy consumption source
+				// (app.ecash4_consumption, loaded by the ETL job
+				// "ecash4-consumption-pull") — independent of every other
+				// source. Source data is monthly (a "YYYY-MM" year_month
+				// label, no real timestamp), so the destination table
+				// carries a generated period_date (first of month) column
+				// for real date-range filtering instead of billmonth-label
+				// resolution; region/district are already human-readable
+				// names, unlike PNS's opaque codes.
+				r.Mount("/ecash4-consumption", ecash4consumption.Routes(db, logr.Logger))
 				// Canonical cross-source Prepaid/Postpaid totals — merges
 				// Zeus/MMS/BOT/BXC (and whatever's added next) server-side
 				// so every frontend consumer reads one number instead of

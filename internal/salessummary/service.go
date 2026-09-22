@@ -10,6 +10,7 @@ import (
 
 	"bknd-3/internal/botconsumption"
 	"bknd-3/internal/bxcconsumption"
+	"bknd-3/internal/ecash4consumption"
 	"bknd-3/internal/holleyconsumption"
 	"bknd-3/internal/mmssales"
 	"bknd-3/internal/zeusbilling"
@@ -23,6 +24,7 @@ type Service struct {
 	bot    *botconsumption.Service
 	bxc    *bxcconsumption.Service
 	holley *holleyconsumption.Service
+	ecash4 *ecash4consumption.Service
 }
 
 func NewService(db *bun.DB) *Service {
@@ -32,6 +34,7 @@ func NewService(db *bun.DB) *Service {
 		bot:    botconsumption.NewService(db),
 		bxc:    bxcconsumption.NewService(db),
 		holley: holleyconsumption.NewService(db),
+		ecash4: ecash4consumption.NewService(db),
 	}
 }
 
@@ -56,14 +59,15 @@ func (s *Service) sourcesFor(category Category) (map[string]sourceFetcher, error
 			// MMS takes precedence over Zeus Prepaid on any meter it
 			// already has — the one real overlap in this system (confirmed
 			// against production data). Every other pairing here (BOT vs
-			// Zeus/MMS, BXC vs Zeus/MMS, BOT vs BXC, Holley vs the rest)
-			// is confirmed genuinely unique, so those sum in directly with
-			// no precedence logic.
+			// Zeus/MMS, BXC vs Zeus/MMS, BOT vs BXC, Holley vs the rest,
+			// ECASH 4 vs the rest) is confirmed genuinely unique, so those
+			// sum in directly with no precedence logic.
 			"zeus_prepaid": s.zeusRows("Prepaid", true),
 			"mms":          s.mmsRows,
 			"bot":          s.botRows,
 			"bxc":          s.bxcRows,
 			"holley":       s.holleyRows,
+			"ecash4":       s.ecash4Rows,
 			// PNS has no backend yet — add it here once it does.
 		}, nil
 	case Postpaid:
@@ -173,6 +177,27 @@ func (s *Service) bxcRows(ctx context.Context, f CommonFilters, groupBy string) 
 
 func (s *Service) holleyRows(ctx context.Context, f CommonFilters, groupBy string) ([]normalizedRow, error) {
 	res, err := s.holley.Aggregate(ctx, holleyconsumption.FilterParams{
+		Region:   f.Region,
+		District: f.District,
+		DateFrom: f.DateFrom,
+		DateTo:   f.DateTo,
+	}, []string{groupBy})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]normalizedRow, len(res.Data))
+	for i, r := range res.Data {
+		val := r.Region
+		if groupBy == "district" {
+			val = r.District
+		}
+		out[i] = normalizedRow{GroupValue: val, Kwh: r.SumKwh, Customers: r.CustomerCount}
+	}
+	return out, nil
+}
+
+func (s *Service) ecash4Rows(ctx context.Context, f CommonFilters, groupBy string) ([]normalizedRow, error) {
+	res, err := s.ecash4.Aggregate(ctx, ecash4consumption.FilterParams{
 		Region:   f.Region,
 		District: f.District,
 		DateFrom: f.DateFrom,

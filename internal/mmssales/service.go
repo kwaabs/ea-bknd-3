@@ -2,14 +2,32 @@ package mmssales
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"bknd-3/internal/dbx"
 	"bknd-3/internal/httpx"
 
 	"github.com/uptrace/bun"
 )
+
+// distinctCustomerCountTimeout bounds distinctCustomerCounts specifically
+// (not the rest of Aggregate) — see that function's comment. A date range
+// covering most of app.mms_customer_sales (11M+ rows, 5.4GB) makes this
+// specific query genuinely expensive regardless of indexing: it's a live
+// COUNT(DISTINCT (account_number, meter_number)) over millions of raw
+// rows, an inherent cost of exact distinct-counting, not something a
+// better index can fix once the range is wide enough that most rows
+// match anyway (confirmed: EXPLAIN ANALYZE on an 8-month range took 65s
+// even with a covering index the planner correctly declined to use,
+// since the index can't narrow which rows match, only reorder them).
+// Bounding it here means a too-wide range fails fast with a clear error
+// in ~10s instead of the caller hanging until its own much longer
+// timeout (or being silently cancelled client-side with no server-side
+// signal at all, as happened before this existed).
+const distinctCustomerCountTimeout = 10 * time.Second
 
 const (
 	table        = "app.mms_customer_sales"
@@ -251,6 +269,9 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 // — the pre-aggregated table can't answer this correctly once the date
 // range spans more than one day.
 func (s *Service) distinctCustomerCounts(ctx context.Context, p FilterParams, groups []string) ([]AggregateRow, error) {
+	ctx, cancel := context.WithTimeout(ctx, distinctCustomerCountTimeout)
+	defer cancel()
+
 	q := s.base(p).ColumnExpr("COUNT(DISTINCT (account_number, meter_number)) AS customer_count")
 	for _, g := range groups {
 		q = q.ColumnExpr(g).GroupExpr(g)
@@ -258,6 +279,9 @@ func (s *Service) distinctCustomerCounts(ctx context.Context, p FilterParams, gr
 
 	var counts []AggregateRow
 	if err := q.Scan(ctx, &counts); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("mms distinct customer count timed out after %s (date range likely too wide for a live count): %w", distinctCustomerCountTimeout, err)
+		}
 		return nil, err
 	}
 	return counts, nil

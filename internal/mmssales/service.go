@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"bknd-3/internal/dbx"
 	"bknd-3/internal/httpx"
@@ -194,9 +195,10 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 	// and cheap — SUM over a few thousand summary rows). The summary's
 	// customer_count is per calendar day though, so SUM-ing it across a
 	// multi-day range would count the same customer once per day they
-	// appear — a true distinct count needs the raw table instead. That
-	// query and the summary query run concurrently rather than back to
-	// back, then get merged by group key below.
+	// appear — a true distinct count needs distinctCustomerCountsFast's
+	// own summary table (app.mms_customer_activity) instead. That query
+	// and this one run concurrently rather than back to back, then get
+	// merged by group key below.
 	q := s.summaryBase(p).
 		ColumnExpr("'MMS Sales' AS data_src").
 		ColumnExpr("COALESCE(ROUND(SUM(sum_credit_balance_remaining)::numeric, 2), 0) AS sum_credit_balance_remaining").
@@ -221,7 +223,7 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 	}()
 	go func() {
 		defer wg.Done()
-		counts, countErr = s.distinctCustomerCounts(ctx, p, groups)
+		counts, countErr = s.distinctCustomerCountsFast(ctx, p, groups)
 	}()
 	wg.Wait()
 
@@ -246,12 +248,55 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 	return &AggregateResult{Data: data, Total: len(data)}, nil
 }
 
-// distinctCustomerCounts computes a true COUNT(DISTINCT account_number,
-// meter_number) per group from the raw table. Used on the summary fast-path
-// — the pre-aggregated table can't answer this correctly once the date
-// range spans more than one day.
-func (s *Service) distinctCustomerCounts(ctx context.Context, p FilterParams, groups []string) ([]AggregateRow, error) {
-	q := s.base(p).ColumnExpr("COUNT(DISTINCT (account_number, meter_number)) AS customer_count")
+// monthsInRange returns every first-of-month date the [from, to] range
+// touches (inclusive of both ends' months) — the exact set
+// distinctCustomerCountsFast checks app.mms_customer_activity.active_months
+// against. Empty (from/to zero) means no date filter should be applied at
+// all, matching dbx.DateRange's convention elsewhere in this codebase —
+// distinguished from "no months match" by the caller checking len() before
+// deciding whether to add a WHERE clause at all.
+func monthsInRange(from, to time.Time) []string {
+	if from.IsZero() || to.IsZero() {
+		return nil
+	}
+	var months []string
+	m := time.Date(from.Year(), from.Month(), 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(to.Year(), to.Month(), 1, 0, 0, 0, 0, time.UTC)
+	for !m.After(end) {
+		months = append(months, m.Format("2006-01-02"))
+		m = m.AddDate(0, 1, 0)
+	}
+	return months
+}
+
+// distinctCustomerCountsFast computes a true COUNT(DISTINCT account_number,
+// meter_number) per group from app.mms_customer_activity — a summary table
+// mirroring app.mms_sales_daily_summary's role, but keyed one row per
+// customer per dimension combination (not per day), carrying an
+// active_months array — so a date-range query is a fast array-overlap
+// check instead of a live scan+sort over millions of raw rows. See
+// sql/summary_mms_customer_activity.sql for the full design and the
+// month-granularity trade-off it accepts. Replaces a raw-table
+// COUNT(DISTINCT ...) that measured ~65s for an 8-month range (EXPLAIN
+// ANALYZE, confirmed even with a covering index the planner correctly
+// declined to use).
+func (s *Service) distinctCustomerCountsFast(ctx context.Context, p FilterParams, groups []string) ([]AggregateRow, error) {
+	q := s.db.NewSelect().
+		TableExpr("app.mms_customer_activity").
+		ColumnExpr("COUNT(DISTINCT (account_number, meter_number)) AS customer_count")
+	q = dimensionFilters(q, p)
+
+	months := monthsInRange(p.DateTimeFrom, p.DateTimeTo)
+	if len(months) > 0 {
+		placeholders := make([]string, len(months))
+		args := make([]interface{}, len(months))
+		for i, m := range months {
+			placeholders[i] = "?"
+			args[i] = m
+		}
+		q = q.Where("active_months && ARRAY["+strings.Join(placeholders, ",")+"]::date[]", args...)
+	}
+
 	for _, g := range groups {
 		q = q.ColumnExpr(g).GroupExpr(g)
 	}

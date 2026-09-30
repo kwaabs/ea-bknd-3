@@ -95,7 +95,7 @@ BEGIN
     INSERT INTO app.mms_customer_activity
         (account_number, meter_number, region, district, contract_type, tariff, manufacturer, model, active_months)
     SELECT
-        account_number, meter_number,
+        COALESCE(account_number, ''), COALESCE(meter_number, ''),
         COALESCE(region, ''), COALESCE(district, ''),
         COALESCE(contract_type, ''), COALESCE(tariff, ''),
         COALESCE(manufacturer, ''), COALESCE(model, ''),
@@ -104,7 +104,7 @@ BEGIN
     WHERE NOT is_duplicate_reading
       AND date_time >= p_from
       AND date_time <  (p_to + 1)
-    GROUP BY account_number, meter_number, COALESCE(region, ''), COALESCE(district, ''),
+    GROUP BY COALESCE(account_number, ''), COALESCE(meter_number, ''), COALESCE(region, ''), COALESCE(district, ''),
              COALESCE(contract_type, ''), COALESCE(tariff, ''), COALESCE(manufacturer, ''), COALESCE(model, '')
     ON CONFLICT (account_number, meter_number, region, district, contract_type, tariff, manufacturer, model)
     DO UPDATE SET active_months = (

@@ -87,6 +87,32 @@ func normalizeZeusRegionNames(regions []string) []string {
 	return out
 }
 
+// streetlightingTariffCode is Zeus Sales' tariffclasscode for
+// streetlighting — flat-rate, MDA-billed consumption, split into its own
+// salessummary Category (Streetlighting) rather than mixed into the
+// regular book of record. See excludeStreetlighting: every zeusbilling
+// query excludes it by default.
+const streetlightingTariffCode = "E03"
+
+// excludeStreetlighting applies the default "Zeus data means Zeus data
+// minus streetlighting" filter, automatically, for every caller —
+// base()/dimensionFilters() call this unconditionally, so a caller never
+// has to remember to opt into excluding E03 (the gap that let it leak
+// into customer-sales-overview.tsx's hand-rolled Postpaid/Prepaid totals,
+// which call this package's HTTP endpoints directly rather than through
+// salessummary). The one exception: a caller that explicitly asks for E03
+// via TariffClassCode (salessummary.streetlightingRows, and the
+// Streetlighting tab's own frontend calls) — that explicit ask always
+// wins over the default exclusion.
+func excludeStreetlighting(q *bun.SelectQuery, p FilterParams) *bun.SelectQuery {
+	for _, code := range p.TariffClassCode {
+		if strings.EqualFold(strings.TrimSpace(code), streetlightingTariffCode) {
+			return q
+		}
+	}
+	return dbx.NotInLower(q, "tariffclasscode", []string{streetlightingTariffCode})
+}
+
 // base returns a select on the raw zeus_sales table with all filters
 // applied. Detail always uses this; Aggregate uses it only as the
 // row-level fallback (search / account / service point / meter code /
@@ -99,7 +125,7 @@ func (s *Service) base(p FilterParams) *bun.SelectQuery {
 	q = dbx.InLowerOrBlank(q, "regionname", p.RegionName)
 	q = dbx.InLowerOrBlank(q, "districtname", p.DistrictName)
 	q = dbx.InLower(q, "tariffclasscode", p.TariffClassCode)
-	q = dbx.NotInLower(q, "tariffclasscode", p.ExcludeTariffClassCode)
+	q = excludeStreetlighting(q, p)
 	q = dbx.InLower(q, "serviceclass", p.ServiceClass)
 	q = dbx.InLower(q, "accounttype", p.AccountType)
 	q = dbx.InLower(q, "billstatus", p.BillStatus)
@@ -164,7 +190,7 @@ func dimensionFilters(q *bun.SelectQuery, p FilterParams) *bun.SelectQuery {
 	q = dbx.InLowerOrBlank(q, "regionname", p.RegionName)
 	q = dbx.InLowerOrBlank(q, "districtname", p.DistrictName)
 	q = dbx.InLower(q, "tariffclasscode", p.TariffClassCode)
-	q = dbx.NotInLower(q, "tariffclasscode", p.ExcludeTariffClassCode)
+	q = excludeStreetlighting(q, p)
 	q = dbx.InLower(q, "serviceclass", p.ServiceClass)
 	q = dbx.InLower(q, "accounttype", p.AccountType)
 	q = dbx.InLower(q, "billstatus", p.BillStatus)

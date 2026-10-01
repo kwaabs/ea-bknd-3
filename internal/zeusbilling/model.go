@@ -110,33 +110,31 @@ type Bill struct {
 // Pagination is not here — it travels as httpx.Pagination, parsed and
 // clamped once in the handler.
 type FilterParams struct {
-	RegionName      []string
-	DistrictName    []string
-	TariffClassCode []string
-	// ExcludeTariffClassCode excludes rows whose tariffclasscode matches
-	// any of these values — an exclude list, unlike TariffClassCode above
-	// (an include list). Used to keep streetlighting (tariffclasscode
-	// E03, split out into its own salessummary Category) from being
-	// double-counted inside the regular Prepaid/Postpaid/AMR figures —
-	// see salessummary.zeusRows.
-	ExcludeTariffClassCode []string
-	ServiceClass           []string
-	AccountType            []string
-	BillStatus             []string
-	BillConsumptionType    []string
-	MeterModelType         []string
-	ServicePointStatus     []string
-	BillingYear            []int
-	BillingMonth           []int
-	IsSensitive            string
-	Search                 string
-	AccountCode            []string
-	ServicePointCode       []string
-	MeterCode              []string
-	LastPaymentDateFrom    time.Time
-	LastPaymentDateTo      time.Time
-	CreatedAtFrom          time.Time
-	CreatedAtTo            time.Time
+	RegionName   []string
+	DistrictName []string
+	// TariffClassCode filters to specific tariff codes — the one
+	// exception to excludeStreetlighting's default E03 exclusion
+	// (service.go): explicitly including "E03" here is how
+	// salessummary.streetlightingRows (and the Streetlighting tab) get
+	// streetlighting rows at all.
+	TariffClassCode     []string
+	ServiceClass        []string
+	AccountType         []string
+	BillStatus          []string
+	BillConsumptionType []string
+	MeterModelType      []string
+	ServicePointStatus  []string
+	BillingYear         []int
+	BillingMonth        []int
+	IsSensitive         string
+	Search              string
+	AccountCode         []string
+	ServicePointCode    []string
+	MeterCode           []string
+	LastPaymentDateFrom time.Time
+	LastPaymentDateTo   time.Time
+	CreatedAtFrom       time.Time
+	CreatedAtTo         time.Time
 	// BillDateFrom/To select the billing period (billingyear+billingmonth)
 	// covering this range — there is no day-precision bill-date column in
 	// zeus_sales, so a UI date-range picker maps onto whole months here.

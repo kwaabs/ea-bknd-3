@@ -1,0 +1,41 @@
+-- Service.Detail (internal/zeusbilling/service.go) always scans the raw
+-- app.zeus_sales table via base(p) — no fast path for a paginated row
+-- listing (see indexes_zeus_sales_detail_sort.sql for the same story on
+-- metermodeltype). The Streetlighting tab (ea-ftnd-2's
+-- streetlighting-hub-view.tsx) filters Detail to tariffclasscode E03 with
+-- no sortBy, which defaults to ORDER BY createdat DESC NULLS LAST,
+-- accountcode, servicepointcode — i.e.
+--   SELECT * FROM app.zeus_sales
+--   WHERE lower(tariffclasscode) = 'e03'
+--   ORDER BY createdat DESC NULLS LAST, accountcode ASC, servicepointcode ASC
+--   LIMIT 50
+--
+-- Confirmed via EXPLAIN ANALYZE, in two steps:
+--   1. No index at all on tariffclasscode: full per-chunk seq scan of this
+--      ~18M-row hypertable. 5353ms.
+--   2. A plain index on lower(tariffclasscode) (idx_zeus_sales_lower_
+--      tariffclasscode, still present — kept for the other two whitelisted
+--      sort columns this table supports, customername/billconsumptionvalue,
+--      same reasoning as indexes_zeus_sales_detail_sort.sql for not
+--      indexing every sort column): correctly narrows the WHERE to ~11.5K
+--      matching E03 rows (0.06% of the table) via Index Scan on every
+--      chunk, but ORDER BY still isn't served by it, so Postgres pulls
+--      ALL ~11.5K matching rows across every chunk and sorts them
+--      (top-N heapsort) just to keep 50 — each row fetch a random heap
+--      read since SELECT * needs every column. Still 5353ms, now entirely
+--      in random I/O rather than the scan.
+--   3. This composite index: matches the filter AND the default sort
+--      columns, so Postgres walks each chunk already in the requested
+--      order (Merge Append across chunks, no Sort node) and stops once 50
+--      rows are found — most chunks only need to produce 1 row before the
+--      LIMIT is satisfied. 36.9ms.
+--
+-- Same hypertable caveat as every other zeus_sales index in this repo:
+-- CREATE INDEX CONCURRENTLY is not supported on a hypertable (errors with
+-- "hypertables do not support concurrent index creation") — this has to
+-- run as a plain CREATE INDEX, which locks writes on the table for the
+-- duration. Run during a quiet window if zeus_sales has live ingestion
+-- traffic.
+CREATE INDEX IF NOT EXISTS idx_zeus_sales_tariffclasscode_createdat
+    ON app.zeus_sales (lower(tariffclasscode), createdat DESC NULLS LAST,
+                        accountcode, servicepointcode);

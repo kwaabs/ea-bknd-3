@@ -90,20 +90,16 @@ func (s *Service) zeusRows(meterModelType string, excludeMmsDuplicates bool) sou
 		if groupBy == "district" {
 			gb = "districtname"
 		}
+		// Streetlighting (tariffclasscode E03) is excluded automatically
+		// by zeusbilling itself (see excludeStreetlighting) — no explicit
+		// filter needed here. It's its own Category; see
+		// streetlightingRows.
 		res, err := s.zeus.Aggregate(ctx, zeusbilling.FilterParams{
 			RegionName:     f.Region,
 			DistrictName:   f.District,
 			MeterModelType: []string{meterModelType},
-			// Streetlighting (tariffclasscode E03) is its own Category
-			// (see streetlightingRows) — excluded here so it isn't
-			// double-counted inside Prepaid/Postpaid/AMR. Confirmed most
-			// E03 rows have metermodeltype=NULL (so a plain
-			// MeterModelType filter wouldn't have caught them anyway),
-			// but excluding it unconditionally here is still correct and
-			// future-proofs against those NULLs ever getting backfilled.
-			ExcludeTariffClassCode: []string{"E03"},
-			BillDateFrom:           f.DateFrom,
-			BillDateTo:             f.DateTo,
+			BillDateFrom:   f.DateFrom,
+			BillDateTo:     f.DateTo,
 		}, []string{gb}, excludeMmsDuplicates)
 		if err != nil {
 			return nil, err

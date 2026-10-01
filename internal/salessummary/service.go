@@ -75,6 +75,10 @@ func (s *Service) sourcesFor(category Category) (map[string]sourceFetcher, error
 			"zeus_postpaid": s.zeusRows("Postpaid", false),
 			"zeus_amr":      s.zeusRows("AMR", false),
 		}, nil
+	case Streetlighting:
+		return map[string]sourceFetcher{
+			"zeus_streetlighting": s.streetlightingRows,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unknown category %q", category)
 	}
@@ -90,8 +94,16 @@ func (s *Service) zeusRows(meterModelType string, excludeMmsDuplicates bool) sou
 			RegionName:     f.Region,
 			DistrictName:   f.District,
 			MeterModelType: []string{meterModelType},
-			BillDateFrom:   f.DateFrom,
-			BillDateTo:     f.DateTo,
+			// Streetlighting (tariffclasscode E03) is its own Category
+			// (see streetlightingRows) — excluded here so it isn't
+			// double-counted inside Prepaid/Postpaid/AMR. Confirmed most
+			// E03 rows have metermodeltype=NULL (so a plain
+			// MeterModelType filter wouldn't have caught them anyway),
+			// but excluding it unconditionally here is still correct and
+			// future-proofs against those NULLs ever getting backfilled.
+			ExcludeTariffClassCode: []string{"E03"},
+			BillDateFrom:           f.DateFrom,
+			BillDateTo:             f.DateTo,
 		}, []string{gb}, excludeMmsDuplicates)
 		if err != nil {
 			return nil, err
@@ -106,6 +118,38 @@ func (s *Service) zeusRows(meterModelType string, excludeMmsDuplicates bool) sou
 		}
 		return out, nil
 	}
+}
+
+// streetlightingRows captures every Zeus Sales row with tariffclasscode
+// E03, regardless of metermodeltype — unlike zeusRows, this deliberately
+// has no MeterModelType filter at all, since most E03 rows aren't
+// classified as Prepaid/Postpaid/AMR in the first place (confirmed
+// ~72% have metermodeltype=NULL). excludeMmsPrepaidDuplicates is always
+// false here — MMS has no streetlighting rows to dedupe against.
+func (s *Service) streetlightingRows(ctx context.Context, f CommonFilters, groupBy string) ([]normalizedRow, error) {
+	gb := "regionname"
+	if groupBy == "district" {
+		gb = "districtname"
+	}
+	res, err := s.zeus.Aggregate(ctx, zeusbilling.FilterParams{
+		RegionName:      f.Region,
+		DistrictName:    f.District,
+		TariffClassCode: []string{"E03"},
+		BillDateFrom:    f.DateFrom,
+		BillDateTo:      f.DateTo,
+	}, []string{gb}, false)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]normalizedRow, len(res.Data))
+	for i, r := range res.Data {
+		val := r.RegionName
+		if groupBy == "district" {
+			val = r.DistrictName
+		}
+		out[i] = normalizedRow{GroupValue: val, Kwh: r.SumBillConsumptionValue, Customers: r.CustomerCount}
+	}
+	return out, nil
 }
 
 func (s *Service) mmsRows(ctx context.Context, f CommonFilters, groupBy string) ([]normalizedRow, error) {

@@ -46,6 +46,24 @@ func InLowerOrBlank(q *bun.SelectQuery, col string, vals []string) *bun.SelectQu
 	return InLower(q, col, vals)
 }
 
+// NotInLower adds `(lower(col) NOT IN (...) OR col IS NULL)`, lowercasing
+// the values, for a case-insensitive exclude filter. No-op when vals is
+// empty. The `OR col IS NULL` guards against SQL's three-valued logic
+// silently dropping NULL-valued rows — `NULL NOT IN (...)` evaluates to
+// NULL (neither true nor false), which a plain WHERE treats as "don't
+// keep," even though a NULL value definitionally isn't any of the
+// excluded values and should stay.
+func NotInLower(q *bun.SelectQuery, col string, vals []string) *bun.SelectQuery {
+	if len(vals) == 0 {
+		return q
+	}
+	lowered := make([]string, len(vals))
+	for i, v := range vals {
+		lowered[i] = strings.ToLower(v)
+	}
+	return q.Where("(lower("+col+") NOT IN (?) OR "+col+" IS NULL)", bun.In(lowered))
+}
+
 // In adds a plain `col IN (...)` filter. No-op when vals is empty.
 func In(q *bun.SelectQuery, col string, vals []string) *bun.SelectQuery {
 	if len(vals) == 0 {

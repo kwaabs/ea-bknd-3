@@ -22,8 +22,8 @@ func (h *Handler) Summary(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
 	category := Category(strings.ToLower(strings.TrimSpace(q.Get("category"))))
-	if category != Prepaid && category != Postpaid {
-		httpx.Error(w, http.StatusBadRequest, "category must be 'prepaid' or 'postpaid'")
+	if category != Prepaid && category != Postpaid && category != Streetlighting {
+		httpx.Error(w, http.StatusBadRequest, "category must be 'prepaid', 'postpaid', or 'streetlighting'")
 		return
 	}
 

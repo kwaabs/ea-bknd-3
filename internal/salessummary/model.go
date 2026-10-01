@@ -28,6 +28,14 @@ type Category string
 const (
 	Prepaid  Category = "prepaid"
 	Postpaid Category = "postpaid"
+	// Streetlighting is Zeus Sales rows with tariffclasscode E03 — flat-
+	// rate/government-billed (via an MDA), not individually-metered
+	// customer consumption, so it doesn't belong under Prepaid or
+	// Postpaid. Split out as its own category rather than folded into
+	// Postpaid: most E03 rows (confirmed ~72% of them) have no
+	// metermodeltype classification at all, so they aren't "Postpaid"
+	// data in any meaningful sense today.
+	Streetlighting Category = "streetlighting"
 )
 
 // CommonFilters are the filters every source can be scoped by — the ones a

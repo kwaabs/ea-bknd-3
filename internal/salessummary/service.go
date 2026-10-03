@@ -13,6 +13,7 @@ import (
 	"bknd-3/internal/ecash4consumption"
 	"bknd-3/internal/holleyconsumption"
 	"bknd-3/internal/mmssales"
+	"bknd-3/internal/pnsconsumption"
 	"bknd-3/internal/zeusbilling"
 
 	"github.com/uptrace/bun"
@@ -25,6 +26,7 @@ type Service struct {
 	bxc    *bxcconsumption.Service
 	holley *holleyconsumption.Service
 	ecash4 *ecash4consumption.Service
+	pns    *pnsconsumption.Service
 }
 
 func NewService(db *bun.DB) *Service {
@@ -35,6 +37,7 @@ func NewService(db *bun.DB) *Service {
 		bxc:    bxcconsumption.NewService(db),
 		holley: holleyconsumption.NewService(db),
 		ecash4: ecash4consumption.NewService(db),
+		pns:    pnsconsumption.NewService(db),
 	}
 }
 
@@ -60,15 +63,22 @@ func (s *Service) sourcesFor(category Category) (map[string]sourceFetcher, error
 			// already has — the one real overlap in this system (confirmed
 			// against production data). Every other pairing here (BOT vs
 			// Zeus/MMS, BXC vs Zeus/MMS, BOT vs BXC, Holley vs the rest,
-			// ECASH 4 vs the rest) is confirmed genuinely unique, so those
-			// sum in directly with no precedence logic.
+			// ECASH4 vs the rest, PNS vs the rest) is confirmed genuinely
+			// unique, so those sum in directly with no precedence logic.
+			// PNS's region/district are opaque codes with no name lookup
+			// yet (pnsconsumption's package doc comment) — a region/
+			// district-filtered request silently excludes PNS rather than
+			// matching nothing-looks-like-an-error, same tradeoff the
+			// frontend's per-region views already made (PNS left out of
+			// combinedChartData's per-region breakdown, folded in only at
+			// the national/source-total level).
 			"zeus_prepaid": s.zeusRows("Prepaid", true),
 			"mms":          s.mmsRows,
 			"bot":          s.botRows,
 			"bxc":          s.bxcRows,
 			"holley":       s.holleyRows,
 			"ecash4":       s.ecash4Rows,
-			// PNS has no backend yet — add it here once it does.
+			"pns":          s.pnsRows,
 		}, nil
 	case Postpaid:
 		return map[string]sourceFetcher{
@@ -253,6 +263,27 @@ func (s *Service) ecash4Rows(ctx context.Context, f CommonFilters, groupBy strin
 			val = r.District
 		}
 		out[i] = normalizedRow{GroupValue: val, Kwh: r.SumKwh, Customers: r.CustomerCount}
+	}
+	return out, nil
+}
+
+func (s *Service) pnsRows(ctx context.Context, f CommonFilters, groupBy string) ([]normalizedRow, error) {
+	res, err := s.pns.Aggregate(ctx, pnsconsumption.FilterParams{
+		RegionID:   f.Region,
+		DistrictID: f.District,
+		DateFrom:   f.DateFrom,
+		DateTo:     f.DateTo,
+	}, []string{groupBy})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]normalizedRow, len(res.Data))
+	for i, r := range res.Data {
+		val := r.RegionID
+		if groupBy == "district" {
+			val = r.DistrictID
+		}
+		out[i] = normalizedRow{GroupValue: val, Kwh: r.SumEnergyKwh, Customers: r.CustomerCount}
 	}
 	return out, nil
 }

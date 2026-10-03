@@ -104,8 +104,16 @@ func (s *Service) zeusRows(meterModelType string, excludeMmsDuplicates bool) sou
 		// by zeusbilling itself (see excludeStreetlighting) — no explicit
 		// filter needed here. It's its own Category; see
 		// streetlightingRows.
+		//
+		// NormalizeZeusRegionNames: zeus_sales.regionname stores the
+		// "X Region" administrative-unit-qualified form, unlike every
+		// other region value in this system — calling zeus.Aggregate
+		// directly here (not through zeusbilling's own HTTP handler, the
+		// only other place this normalization used to run) silently
+		// matched zero rows on any region filter until this was added.
+		// See NormalizeZeusRegionNames' own doc comment for the full story.
 		res, err := s.zeus.Aggregate(ctx, zeusbilling.FilterParams{
-			RegionName:     f.Region,
+			RegionName:     zeusbilling.NormalizeZeusRegionNames(f.Region),
 			DistrictName:   f.District,
 			MeterModelType: []string{meterModelType},
 			BillDateFrom:   f.DateFrom,
@@ -137,8 +145,9 @@ func (s *Service) streetlightingRows(ctx context.Context, f CommonFilters, group
 	if groupBy == "district" {
 		gb = "districtname"
 	}
+	// NormalizeZeusRegionNames — see zeusRows' identical comment above.
 	res, err := s.zeus.Aggregate(ctx, zeusbilling.FilterParams{
-		RegionName:      f.Region,
+		RegionName:      zeusbilling.NormalizeZeusRegionNames(f.Region),
 		DistrictName:    f.District,
 		TariffClassCode: []string{"E03"},
 		BillDateFrom:    f.DateFrom,

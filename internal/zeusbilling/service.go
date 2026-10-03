@@ -60,7 +60,7 @@ func billingPeriodDateBounds(from, to time.Time) (start, endExclusive time.Time,
 	return start, endExclusive, true
 }
 
-// normalizeZeusRegionNames appends " Region" to each region name that
+// NormalizeZeusRegionNames appends " Region" to each region name that
 // doesn't already end with it. zeus_sales.regionname always stores the
 // administrative-unit-qualified form ("Tema Region", "Accra East Region"),
 // but every other source of a region value in this system (the meter
@@ -72,7 +72,22 @@ func billingPeriodDateBounds(from, to time.Time) (start, endExclusive time.Time,
 // differently-cased "region" suffix isn't doubled up; the appended suffix
 // itself doesn't need to match the stored casing since every filter that
 // reads RegionName compares via lower(regionname) anyway.
-func normalizeZeusRegionNames(regions []string) []string {
+//
+// Exported (not just handler.go-local) because any caller that builds a
+// zeusbilling.FilterParams directly in-process — bypassing this package's
+// own HTTP handler, which is the only place this used to be called —
+// needs the same normalization. internal/salessummary's zeusRows and
+// streetlightingRows are exactly that: they call zeus.Aggregate directly,
+// so a region filter on either Postpaid/Prepaid (salessummary.Prepaid/
+// Postpaid) or Streetlighting (salessummary.Streetlighting) silently
+// matched zero Zeus rows until this was wired in there too (see those two
+// functions in internal/salessummary/service.go). Postpaid/Prepaid masked
+// the symptom for a while — MMS and the legacy sources don't need " Region"
+// suffixing, so a region-filtered Prepaid/Postpaid total still showed real,
+// nonzero numbers even with the Zeus portion silently zeroed out. Streetlighting
+// has no non-Zeus fallback, so the same bug showed up there as an obvious,
+// unmistakable zero.
+func NormalizeZeusRegionNames(regions []string) []string {
 	if len(regions) == 0 {
 		return regions
 	}

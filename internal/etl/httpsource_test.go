@@ -123,6 +123,50 @@ func TestBuildHTTPRequest_FullRefreshRejectsWatermarkToken(t *testing.T) {
 	}
 }
 
+func TestBuildHTTPRequest_CurrentYearMonthSubstitution(t *testing.T) {
+	// full_refresh, no {{WATERMARK}}/{{FILTER}} at all -- CURRENT_YEAR/
+	// CURRENT_MONTH carry no mode restriction, unlike those two tokens.
+	job := Job{
+		Name:        "j1",
+		Mode:        ModeFullRefresh,
+		SourceQuery: "/api/v1/sales?year={{CURRENT_YEAR}}&month={{CURRENT_MONTH}}",
+	}
+	path, values, err := buildHTTPRequest(job, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	now := time.Now().UTC()
+	wantYear := strconv.Itoa(now.Year())
+	wantMonth := fmt.Sprintf("%02d", int(now.Month()))
+	if path != "/api/v1/sales" {
+		t.Errorf("path = %q, want /api/v1/sales", path)
+	}
+	if values.Get("year") != wantYear || values.Get("month") != wantMonth {
+		t.Errorf("values = %v, want year=%s month=%s", values, wantYear, wantMonth)
+	}
+}
+
+func TestBuildHTTPRequest_CurrentYearMonthAlongsideWatermark(t *testing.T) {
+	// Confirms CURRENT_YEAR/CURRENT_MONTH substitute correctly alongside a
+	// real {{WATERMARK}} in the same incremental job -- the two mechanisms
+	// don't interfere with each other.
+	wt := WatermarkInteger
+	job := Job{
+		Name:          "j1",
+		Mode:          ModeIncremental,
+		WatermarkType: &wt,
+		SourceQuery:   "/api/v1/sales?year={{CURRENT_YEAR}}&cursor={{WATERMARK}}",
+	}
+	_, values, err := buildHTTPRequest(job, "42")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantYear := strconv.Itoa(time.Now().UTC().Year())
+	if values.Get("year") != wantYear || values.Get("cursor") != "42" {
+		t.Errorf("values = %v, want year=%s cursor=42", values, wantYear)
+	}
+}
+
 func TestBuildFilteredHTTPRequest_Substitution(t *testing.T) {
 	job := Job{
 		Name:        "j1",

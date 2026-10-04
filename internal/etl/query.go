@@ -14,6 +14,18 @@ const cursorCol2Token = "{{CURSOR_COL2}}"
 const rangeStartToken = "{{RANGE_START}}"
 const rangeEndToken = "{{RANGE_END}}"
 
+// currentYearToken/currentMonthToken are substituted with the server's own
+// current UTC date at request-build time — for an http_api source whose
+// data is scoped by an exact (year, month) pair rather than a "since X"
+// cursor (no open-ended range query available), so {{WATERMARK}}'s
+// continuously-advancing-cursor model doesn't fit. Unlike WATERMARK/
+// FILTER, these carry no mode restriction and no "must reference" check:
+// they're an optional convenience, not a contract a job's mode implies.
+// HTTP-only for now (see substituteHTTPTokens) — no SQL source has needed
+// this yet; add SQL support if one does rather than wiring it in unused.
+const currentYearToken = "{{CURRENT_YEAR}}"
+const currentMonthToken = "{{CURRENT_MONTH}}"
+
 // cursorSentinel is substituted for a filter chunk's very first page,
 // before any row of it has been seen. Both cursor columns must be
 // numeric (id/tv-style: a device id and a Unix-epoch second count, both

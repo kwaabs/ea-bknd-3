@@ -1,9 +1,9 @@
 # ETL engine
 
 A small in-process data-loading engine (`internal/etl`) that pulls rows out
-of external databases — Oracle, MSSQL, Postgres today, anything else
-`database/sql`-compatible later — on a nightly schedule and lands them into
-a table in this app's own `app` schema.
+of external systems — Oracle, MSSQL, Postgres databases, or a paginated
+HTTP/JSON API (see "HTTP API sources" below) — on a nightly schedule and
+lands them into a table in this app's own `app` schema.
 
 It only does **E + L**. It deliberately does not transform on the way in.
 A landing table this engine populates is meant to be read by a separate
@@ -142,6 +142,84 @@ cross-database join:
   set, and must not reference it otherwise — same "don't silently ignore
   a token" discipline as `{{WATERMARK}}`.
 
+## HTTP API sources (`kind = "http_api"`)
+
+A fourth source kind alongside Oracle/MSSQL/Postgres: pulls paginated JSON
+out of a REST API instead of running SQL against a database
+(`internal/etl/httpsource.go`). Produces the same `RowSource` shape as the
+SQL kinds, so everything above this section — scheduling, watermarks,
+filters, upserts, observability — works identically; only how rows are
+fetched differs.
+
+Apply `sql/etl_http_api_sources.sql` to add this kind and its job columns.
+It reuses `app.etl_sources`' existing columns rather than adding new ones:
+
+- `host` → the API's base URL (e.g. `https://api.example.com`)
+- `username` → the API's `api-id`, sent as-is in an `api-id` request header
+- `password_encrypted` → the API's secret key — encrypted at rest exactly
+  like a DB password already is, but never sent on the wire itself; used
+  locally to compute a per-request HMAC signature (below)
+- `port` / `database_name` → unused for this kind
+
+Every request is authenticated the same way, per one specific documented
+vendor recipe (not a pluggable auth scheme — a different API needing a
+different auth mechanism, e.g. a bearer token, needs new code):
+`api-id` and `signature` headers, where `signature = base64(HMAC-SHA256(
+key=apiKey, message=timestamp+apiID))`, plus a `timestamp` query parameter
+carrying that same signing timestamp (always "now" — see
+`TestSignRequest_MatchesDocumentedRecipe`). Pagination is `limit`/`offset`
+query parameters, with "this page came back shorter than `page_size`" as
+the only end-of-data signal (no cursor/next-page-token support, no
+total-count awareness).
+
+A job whose source is `http_api` uses three extra columns, otherwise
+ignored:
+
+- `source_fields` (text[], required) — the HTTP analog of a SQL
+  `SELECT` list's column order: since a JSON object has no inherent
+  column order, this says explicitly which fields (dot-paths, e.g.
+  `"region.name"`) become which `dest_columns`, position-for-position.
+- `records_path` (text, default `"data"`) — the dot-path to the JSON
+  array of records within each page's response body (e.g. `"data.items"`).
+  The admin UI's Test button can auto-detect this from a live sample
+  response rather than guessing.
+- `page_size` (integer, default 500) — the `limit` sent on every request.
+
+`source_query` on an `http_api` job is a path + query-string template, not
+SQL — e.g. `/api/v1/sales?year=2026&month={{WATERMARK}}`. The same
+`{{WATERMARK}}`/`{{FILTER}}` contracts above apply, substituted into
+query-parameter values rather than SQL literals (percent-encoded by
+`net/url`, so no quoting of its own is needed).
+
+### `{{CURRENT_YEAR}}` / `{{CURRENT_MONTH}}` — for an API scoped by exact calendar month
+
+Some APIs don't offer an open "give me everything since X" query at
+all — they require an exact `(year, month)` pair per call, which
+`{{WATERMARK}}`'s continuously-advancing-cursor model doesn't fit (there's
+no "greater than" to ask for). For that shape, `source_query` can
+reference `{{CURRENT_YEAR}}` and/or `{{CURRENT_MONTH}}` (zero-padded,
+e.g. `"07"`), substituted from the server's own current UTC date at
+request-build time — e.g. `/api/v1/sales?year={{CURRENT_YEAR}}&month=
+{{CURRENT_MONTH}}`.
+
+Unlike `{{WATERMARK}}`/`{{FILTER}}`, these carry **no mode restriction and
+no "must reference" validation** — they're an optional convenience, not a
+contract a job's `mode` implies, and may be combined freely with either
+token in the same `source_query` (see
+`TestBuildHTTPRequest_CurrentYearMonthAlongsideWatermark`).
+
+The usual shape for a source like this: `mode = "full_refresh"`,
+`trigger_times` set nightly, and `conflict_columns` set so the job
+re-pulls and upserts the current month every run — correctly picking up
+new/corrected rows the vendor adds through the month, without duplicating
+rows already loaded. This does **not** backfill months before the job
+started running; backfill those separately, e.g. a manual-trigger-only
+job (`trigger_times` empty) per past month with its year/month hardcoded
+instead of tokenized, run once via "Run now" and then left alone.
+
+HTTP-only for now — no SQL source has needed month-scoped pagination yet;
+add SQL support if and when one does rather than wiring it in unused.
+
 ## Upserts vs. plain append
 
 Set `conflict_columns` (text[]) on a job to get
@@ -199,3 +277,13 @@ from the last *committed* batch's watermark, not the crashed one.
   `internal/etl/engine.go`) — disabling the *job* is what actually stops
   it from running, not disabling the source out from under a still-enabled
   job.
+- `http_api` sources support exactly one auth scheme (api-id + HMAC-SHA256
+  signature + timestamp header, see "HTTP API sources" above) and one
+  pagination style (limit/offset, "short page = done"). A different API
+  needing a different auth mechanism (bearer token, OAuth2, Basic auth) or
+  pagination style (cursor/next-page-token) needs new code, not just a new
+  source row.
+- `cursor_columns` keyset pagination (the SQL kinds' alternative to
+  `{{WATERMARK}}` for a source whose `ORDER BY` can't use a single column)
+  isn't implemented for `http_api` sources — a job on an HTTP source
+  referencing `cursor_columns` fails at run time.

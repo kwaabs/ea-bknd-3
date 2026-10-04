@@ -125,11 +125,36 @@ func splitPathQuery(sourceQuery string) (path string, values url.Values, err err
 	return path, values, nil
 }
 
-// substituteHTTPTokens replaces {{WATERMARK}}/{{FILTER}} inside each query
-// parameter value, in place. Enforces the identical "full_refresh must not
-// reference {{WATERMARK}}, incremental must" contract buildQuery (query.go)
-// applies to SQL jobs — same invariant, just checked against parsed query
-// values instead of raw SQL text.
+// substituteCurrentDateTokens replaces {{CURRENT_YEAR}}/{{CURRENT_MONTH}}
+// inside each query parameter value, in place, from the server's own
+// current UTC date (same "Ghana has no DST" assumption
+// scheduler.StartDailySessionReset already documents). Unlike
+// {{WATERMARK}}/{{FILTER}}, these need no job/run state at all — "today's
+// year/month" is just as real a value during the admin UI's interactive
+// Test preview (testHTTPQuery, before any job exists) as during a real
+// run, so both call this directly rather than only substituting it inside
+// substituteHTTPTokens.
+func substituteCurrentDateTokens(values url.Values) {
+	now := time.Now().UTC()
+	currentYear := strconv.Itoa(now.Year())
+	currentMonth := fmt.Sprintf("%02d", int(now.Month()))
+	for k, vs := range values {
+		for i, v := range vs {
+			v = strings.ReplaceAll(v, currentYearToken, currentYear)
+			v = strings.ReplaceAll(v, currentMonthToken, currentMonth)
+			vs[i] = v
+		}
+		values[k] = vs
+	}
+}
+
+// substituteHTTPTokens replaces {{WATERMARK}}/{{FILTER}}/{{CURRENT_YEAR}}/
+// {{CURRENT_MONTH}} inside each query parameter value, in place. Enforces
+// the identical "full_refresh must not reference {{WATERMARK}},
+// incremental must" contract buildQuery (query.go) applies to SQL jobs —
+// same invariant, just checked against parsed query values instead of raw
+// SQL text. {{CURRENT_YEAR}}/{{CURRENT_MONTH}} carry no such contract (see
+// substituteCurrentDateTokens).
 func substituteHTTPTokens(job Job, values url.Values, lastWatermark, filterLiteral string, hasFilter bool) error {
 	hasWatermarkToken := false
 	hasFilterToken := false
@@ -168,14 +193,6 @@ func substituteHTTPTokens(job Job, values url.Values, lastWatermark, filterLiter
 		return fmt.Errorf("etl: job %q's source_query references %s but has no filter_query set", job.Name, filterToken)
 	}
 
-	// CURRENT_YEAR/CURRENT_MONTH: an optional convenience, not a
-	// per-mode contract -- substituted whenever present, in any mode,
-	// from the server's own current UTC date (same "Ghana has no DST"
-	// assumption scheduler.StartDailySessionReset already documents).
-	now := time.Now().UTC()
-	currentYear := strconv.Itoa(now.Year())
-	currentMonth := fmt.Sprintf("%02d", int(now.Month()))
-
 	for k, vs := range values {
 		for i, v := range vs {
 			if hasWatermarkToken {
@@ -184,12 +201,11 @@ func substituteHTTPTokens(job Job, values url.Values, lastWatermark, filterLiter
 			if hasFilterToken {
 				v = strings.ReplaceAll(v, filterToken, filterLiteral)
 			}
-			v = strings.ReplaceAll(v, currentYearToken, currentYear)
-			v = strings.ReplaceAll(v, currentMonthToken, currentMonth)
 			vs[i] = v
 		}
 		values[k] = vs
 	}
+	substituteCurrentDateTokens(values)
 	return nil
 }
 
@@ -408,9 +424,13 @@ func (h *httpRowSource) fetchPage(ctx context.Context) error {
 
 // testHTTPQuery is TestQuery's (service.go) http_api branch: fetches ONE
 // page (no pagination loop — this is an interactive preview, not a real
-// pull) of sourceQuery literally, with no {{WATERMARK}}/{{FILTER}}
-// substitution — same "tokens aren't substituted for a test" behavior the
-// SQL kinds already have (see the wizard's own hint text). Auto-detects
+// pull) of sourceQuery, with no {{WATERMARK}}/{{FILTER}} substitution —
+// same "tokens aren't substituted for a test" behavior the SQL kinds
+// already have (see the wizard's own hint text); both need state
+// (app.etl_job_state, a job's filter_query) that doesn't exist yet at
+// this point in the wizard flow. {{CURRENT_YEAR}}/{{CURRENT_MONTH}} are
+// substituted though (via substituteCurrentDateTokens), since they need
+// no such state. Auto-detects
 // which top-level response field holds the record array (there's no
 // records_path yet at this point in the wizard flow — no job exists to
 // have one) and flattens the sampled records' fields into Columns/Rows in
@@ -421,6 +441,12 @@ func testHTTPQuery(ctx context.Context, creds httpAPICreds, sourceQuery string) 
 	if err != nil {
 		return nil, err
 	}
+	// Unlike {{WATERMARK}}/{{FILTER}} (deliberately left untouched here —
+	// no job/run state exists yet to substitute them from), {{CURRENT_YEAR}}/
+	// {{CURRENT_MONTH}} need no such state, so a preview of a month-scoped
+	// API hits the real, current month instead of sending the literal
+	// token text and getting rejected by the source.
+	substituteCurrentDateTokens(values)
 
 	started := time.Now()
 	parsed, err := fetchJSONPage(ctx, httpClientForSources, creds, path, values, testQueryMaxRows, 0)

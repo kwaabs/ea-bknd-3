@@ -384,3 +384,36 @@ func TestTestHTTPQuery_ZeroRecordsReturnsEmptyColumnsArray(t *testing.T) {
 		t.Fatalf(`"columns" field in the JSON response = %s, want "[]" (not null)`, decoded["columns"])
 	}
 }
+
+// TestTestHTTPQuery_SubstitutesCurrentYearMonth confirms the admin UI's
+// Test preview resolves {{CURRENT_YEAR}}/{{CURRENT_MONTH}} to real values
+// before sending the request — unlike {{WATERMARK}}/{{FILTER}}, which
+// deliberately stay unsubstituted at preview time (see testHTTPQuery's
+// comment), these need no job/run state, so a preview against a
+// month-scoped API (like the one that motivated this feature) hits the
+// real current month instead of sending the literal "{{CURRENT_YEAR}}"
+// text and getting rejected by the source with something like "Kindly
+// Enter Valid Month And Year" — the exact failure mode this test guards
+// against regressing to.
+func TestTestHTTPQuery_SubstitutesCurrentYearMonth(t *testing.T) {
+	var gotYear, gotMonth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotYear = r.URL.Query().Get("year")
+		gotMonth = r.URL.Query().Get("month")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"rows": []interface{}{}})
+	}))
+	defer srv.Close()
+
+	creds := httpAPICreds{BaseURL: srv.URL, APIID: "id", APIKey: "key"}
+	if _, err := testHTTPQuery(context.Background(), creds, "/api/v1/sales?year={{CURRENT_YEAR}}&month={{CURRENT_MONTH}}"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	now := time.Now().UTC()
+	wantYear := strconv.Itoa(now.Year())
+	wantMonth := fmt.Sprintf("%02d", int(now.Month()))
+	if gotYear != wantYear || gotMonth != wantMonth {
+		t.Errorf("server received year=%q month=%q, want year=%q month=%q (not the literal token text)", gotYear, gotMonth, wantYear, wantMonth)
+	}
+}

@@ -208,6 +208,17 @@ contract a job's `mode` implies, and may be combined freely with either
 token in the same `source_query` (see
 `TestBuildHTTPRequest_CurrentYearMonthAlongsideWatermark`).
 
+They're also the one pair of tokens the admin UI's **Test** button
+actually resolves before previewing a query — `{{WATERMARK}}`/`{{FILTER}}`
+stay as literal text in a preview (there's no job/run state yet to
+substitute them from, same as the SQL kinds), but `{{CURRENT_YEAR}}`/
+`{{CURRENT_MONTH}}` need no such state, so Test hits the real current
+month. Leaving a job's `source_query` with a literal `{{CURRENT_YEAR}}`
+sent as-is is exactly how a month-scoped API rejects the request (e.g.
+with something like "Kindly enter valid month and year") — if Test fails
+that way, the token didn't get substituted; check the query string was
+saved with the exact literal `{{CURRENT_YEAR}}`/`{{CURRENT_MONTH}}` spelling.
+
 The usual shape for a source like this: `mode = "full_refresh"`,
 `trigger_times` set nightly, and `conflict_columns` set so the job
 re-pulls and upserts the current month every run — correctly picking up

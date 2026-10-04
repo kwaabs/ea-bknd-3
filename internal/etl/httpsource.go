@@ -168,6 +168,14 @@ func substituteHTTPTokens(job Job, values url.Values, lastWatermark, filterLiter
 		return fmt.Errorf("etl: job %q's source_query references %s but has no filter_query set", job.Name, filterToken)
 	}
 
+	// CURRENT_YEAR/CURRENT_MONTH: an optional convenience, not a
+	// per-mode contract -- substituted whenever present, in any mode,
+	// from the server's own current UTC date (same "Ghana has no DST"
+	// assumption scheduler.StartDailySessionReset already documents).
+	now := time.Now().UTC()
+	currentYear := strconv.Itoa(now.Year())
+	currentMonth := fmt.Sprintf("%02d", int(now.Month()))
+
 	for k, vs := range values {
 		for i, v := range vs {
 			if hasWatermarkToken {
@@ -176,6 +184,8 @@ func substituteHTTPTokens(job Job, values url.Values, lastWatermark, filterLiter
 			if hasFilterToken {
 				v = strings.ReplaceAll(v, filterToken, filterLiteral)
 			}
+			v = strings.ReplaceAll(v, currentYearToken, currentYear)
+			v = strings.ReplaceAll(v, currentMonthToken, currentMonth)
 			vs[i] = v
 		}
 		values[k] = vs

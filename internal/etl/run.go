@@ -604,7 +604,15 @@ func loadBatch(ctx context.Context, destDB *bun.DB, job Job, batch [][]interface
 	// path and handles "?" correctly, so that's what buildInsertSQL now
 	// emits.
 	if _, err := tx.NewRaw(query, args...).Exec(ctx); err != nil {
-		return fmt.Errorf("etl: insert batch for job %q: %w", job.Name, err)
+		// conflict_columns is included because this exact error (Postgres
+		// 42P10, "no unique or exclusion constraint matching the ON
+		// CONFLICT specification") can ONLY occur when job.ConflictColumns
+		// was non-empty at the moment buildInsertSQL ran (see its own "if
+		// len(job.ConflictColumns) > 0" guard) — surfacing it here settles
+		// "is the job's current DB row really what the engine used" on
+		// sight, instead of needing a separate query against app.etl_jobs
+		// to rule out a stale/duplicate row.
+		return fmt.Errorf("etl: insert batch for job %q (conflict_columns=%v): %w", job.Name, job.ConflictColumns, err)
 	}
 
 	if newWatermark != nil {

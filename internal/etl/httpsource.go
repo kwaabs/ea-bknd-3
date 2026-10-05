@@ -341,6 +341,16 @@ func (h *httpRowSource) Columns() ([]string, error) {
 	return h.fields, nil
 }
 
+// httpRequestDebug captures the literal HTTP request fetchJSONPage sent —
+// method, full URL (including its signed query string), and headers — for
+// exposing back to the admin UI's Test preview. Never carries apiKey: it's
+// never put on the wire (see signRequest), so there's nothing to redact.
+type httpRequestDebug struct {
+	Method  string            `json:"method"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+}
+
 // fetchJSONPage builds one signed, paginated GET (path+baseValues plus a
 // fresh timestamp/signature and the given limit/offset), executes it
 // against client, and returns the decoded JSON response body. Shared by
@@ -348,7 +358,12 @@ func (h *httpRowSource) Columns() ([]string, error) {
 // testHTTPQuery (the wizard's interactive preview, before a job — and its
 // RecordsPath — exists), so the request-building/signing/error-handling
 // stays identical for both.
-func fetchJSONPage(ctx context.Context, client *http.Client, creds httpAPICreds, path string, baseValues url.Values, limit, offset int) (map[string]interface{}, error) {
+//
+// debug, when non-nil, is filled in with the request actually sent —
+// fetchPage's real-run callsite always passes nil (no need to pay for it
+// on every page of every run); testHTTPQuery passes a live pointer so it
+// can return the request on TestQueryResult.DebugRequest.
+func fetchJSONPage(ctx context.Context, client *http.Client, creds httpAPICreds, path string, baseValues url.Values, limit, offset int, debug *httpRequestDebug) (map[string]interface{}, error) {
 	values := url.Values{}
 	for k, vs := range baseValues {
 		values[k] = append([]string(nil), vs...)
@@ -372,6 +387,15 @@ func fetchJSONPage(ctx context.Context, client *http.Client, creds httpAPICreds,
 	// header" from the actual API.
 	req.Header.Set("signature", signature)
 	req.Header.Set("Accept", "application/json")
+
+	if debug != nil {
+		debug.Method = req.Method
+		debug.URL = req.URL.String()
+		debug.Headers = map[string]string{}
+		for k := range req.Header {
+			debug.Headers[k] = req.Header.Get(k)
+		}
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -402,7 +426,7 @@ func (h *httpRowSource) fetchPage(ctx context.Context) error {
 		return fmt.Errorf("etl: exceeded %d pages without the source signaling completion — refusing to page forever", maxHTTPPages)
 	}
 
-	parsed, err := fetchJSONPage(ctx, h.client, h.creds, h.path, h.baseValues, h.pageSize, h.offset)
+	parsed, err := fetchJSONPage(ctx, h.client, h.creds, h.path, h.baseValues, h.pageSize, h.offset, nil)
 	if err != nil {
 		return err
 	}
@@ -449,17 +473,24 @@ func testHTTPQuery(ctx context.Context, creds httpAPICreds, sourceQuery string) 
 	substituteCurrentDateTokens(values)
 
 	started := time.Now()
-	parsed, err := fetchJSONPage(ctx, httpClientForSources, creds, path, values, testQueryMaxRows, 0)
+	debug := &httpRequestDebug{}
+	parsed, err := fetchJSONPage(ctx, httpClientForSources, creds, path, values, testQueryMaxRows, 0, debug)
 	if err != nil {
-		return nil, err
+		// debug is filled in as soon as the request is built (before
+		// it's sent), so it's present even when client.Do or the status
+		// check below fails — surfacing it here means a 401/404/timeout
+		// during Test still shows the user exactly what was sent, not
+		// just the error.
+		return nil, fmt.Errorf("%w (request sent: %s %s)", err, debug.Method, debug.URL)
 	}
 
 	recordsPath, records, err := autoDetectRecords(parsed)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w (request sent: %s %s)", err, debug.Method, debug.URL)
 	}
 
 	result := &TestQueryResult{
+		DebugRequest: debug,
 		// Columns must be a real (possibly empty) slice, not Go's nil
 		// zero value — a nil []string marshals to JSON "null", and the
 		// frontend always treats result.columns as an array (calling

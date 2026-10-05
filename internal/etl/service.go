@@ -807,6 +807,13 @@ type TestQueryResult struct {
 	// the job's records_path with this rather than asking the user to
 	// guess it before ever seeing a real response.
 	DetectedRecordsPath string `json:"detected_records_path,omitempty"`
+	// DebugRequest is set only for an http_api source: the literal
+	// outgoing request testHTTPQuery sent (method, full URL with its
+	// query string, and headers) — surfaced to the admin UI so a user
+	// debugging "why no rows" can see exactly what was sent without
+	// needing server log access. apiKey is never included since it's
+	// never put on the wire in the first place (see signRequest).
+	DebugRequest *httpRequestDebug `json:"debug_request,omitempty"`
 }
 
 // TestQuery runs an arbitrary read-only query against a source and returns

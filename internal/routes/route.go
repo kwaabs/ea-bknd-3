@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"bknd-3/internal/alphaconsumption"
 	"bknd-3/internal/amrcustomer"
 	"bknd-3/internal/announcements"
 	"bknd-3/internal/auth"
@@ -224,6 +225,14 @@ func NewRouter(db *bun.DB, cfg *config.Config, logr *logger.Logger, c cache.Cach
 				// resolution; region/district are already human-readable
 				// names, unlike PNS's opaque codes.
 				r.Mount("/ecash4-consumption", ecash4consumption.Routes(db, logr.Logger))
+				// Alpha T&D-ingested legacy consumption source
+				// (app.alpha_tnd_consumption_raw, loaded by the ETL job
+				// "alpha-tnd-consumption-fetch") — independent of every
+				// other source. No region/district dimension at all on
+				// this source, only a substation name and consumer/meter
+				// identifiers; has real fromdatetime/todatetime timestamps
+				// like PNS/Holley, so no billmonth-label resolution needed.
+				r.Mount("/alpha-consumption", alphaconsumption.Routes(db, logr.Logger))
 				// Canonical cross-source Prepaid/Postpaid totals — merges
 				// Zeus/MMS/BOT/BXC (and whatever's added next) server-side
 				// so every frontend consumer reads one number instead of

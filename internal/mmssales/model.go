@@ -30,16 +30,34 @@ type Sale struct {
 	Longitude               *float64   `bun:"longitude" json:"longitude"`
 	MeterSerialNumber       string     `bun:"meter_serial_number" json:"meter_serial_number"`
 	STSLastMonthKwhRead     *float64   `bun:"sts_last_month_kwh_read" json:"sts_last_month_kwh_read"`
-	// ConsumptionBand is populated only for rows sourced from
-	// app.mms_sales_accounting (see sql/mms_sales_accounting_migration.sql) —
-	// empty string for older rows still carrying their original MMS_SALES
-	// shape. STS credit-balance fields (sts_credit_balance_remaining,
-	// sts_last_month_credit_read) were dropped along with that switch: the
-	// new feed never had credit data, so those columns are always NULL for
-	// any row populated after the cutover and are no longer surfaced here.
-	ConsumptionBand string     `bun:"consumption_band" json:"consumption_band,omitempty"`
-	DateTime        *time.Time `bun:"date_time" json:"date_time"`
-	DataSrc         string     `bun:"data_src" json:"data_src"`
+	// STSCreditBalanceRemaining / STSLastMonthCreditRead: app.mms_customer_sales
+	// still HAS these columns — the mms_sales_accounting migration (sql/
+	// mms_sales_accounting_migration.sql) is minimal-footprint, it never
+	// dropped them, it just stopped populating them (always NULL for any
+	// row inserted after the cutover). Detail's query is a SELECT * (see
+	// service.go), so bun needs a struct field for every column the table
+	// actually has, scanned or not — omitting these two entirely, as a
+	// first pass at this change did, makes every Detail call fail with
+	// "bun: Sale does not have column \"sts_credit_balance_remaining\"",
+	// a live incident this comment exists to prevent recurring. json:"-"
+	// keeps them out of the API response, matching the "removed from the
+	// UI" decision without needing the column itself to be gone.
+	STSCreditBalanceRemaining *float64 `bun:"sts_credit_balance_remaining" json:"-"`
+	STSLastMonthCreditRead    *float64 `bun:"sts_last_month_credit_read" json:"-"`
+	// Consumption/RoundedConsumption/ConsumptionBand/Year/Month/MonthYear
+	// are the new columns mms_sales_accounting_migration.sql added —
+	// empty/zero for older rows still carrying their original MMS_SALES
+	// shape. Same SELECT * reasoning as above: all six must have a struct
+	// field or Detail breaks the moment a row populated by the new
+	// pipeline is scanned.
+	Consumption        *float64   `bun:"consumption" json:"consumption,omitempty"`
+	RoundedConsumption *float64   `bun:"rounded_consumption" json:"rounded_consumption,omitempty"`
+	ConsumptionBand    string     `bun:"consumption_band" json:"consumption_band,omitempty"`
+	Year               string     `bun:"year" json:"year,omitempty"`
+	Month              string     `bun:"month" json:"month,omitempty"`
+	MonthYear          string     `bun:"monthyear" json:"monthyear,omitempty"`
+	DateTime           *time.Time `bun:"date_time" json:"date_time"`
+	DataSrc            string     `bun:"data_src" json:"data_src"`
 	// IsDuplicateReading (sql/mms_customer_sales_dedup.sql) is scanned so
 	// Detail's SELECT * doesn't fail on this column, but base() already
 	// filters WHERE NOT is_duplicate_reading unconditionally — every row

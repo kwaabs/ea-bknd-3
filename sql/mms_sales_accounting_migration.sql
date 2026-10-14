@@ -229,15 +229,15 @@ BEGIN
             is_duplicate_reading
         )
         SELECT
-            s.meter_id,
-            s.meter_id,
-            COALESCE(NULLIF(trim(s.spn), ''), m.account_number),
-            trim(s.region),
-            trim(s.district),
-            s.tariff,
-            s.manufacturer,
-            s.model,
-            s.installation_date,
+            d.meter_id,
+            d.meter_id,
+            COALESCE(NULLIF(trim(d.spn), ''), m.account_number),
+            trim(d.region),
+            trim(d.district),
+            d.tariff,
+            d.manufacturer,
+            d.model,
+            d.installation_date,
             m.removal_date,
             m.customer_name,
             m.contract_code,
@@ -249,22 +249,39 @@ BEGIN
             m.address,
             m.latitude::float8,
             m.longitude::float8,
-            s.consumption,
-            s.rounded_consumption,
-            s.consumption_band,
-            s.year,
-            s.month,
-            s.monthyear,
-            s.consumption,                                   -- sts_last_month_kwh_read repointed to the new measure
+            d.consumption,
+            d.rounded_consumption,
+            d.consumption_band,
+            d.year,
+            d.month,
+            d.monthyear,
+            d.consumption,                                   -- sts_last_month_kwh_read repointed to the new measure
             NULL,                                             -- sts_credit_balance_remaining: no longer delivered
             NULL,                                             -- sts_last_month_credit_read: no longer delivered
-            to_date(s.monthyear, 'YYYYMM'),                   -- synthesized first-of-month date_time
+            to_date(d.monthyear, 'YYYYMM'),                   -- synthesized first-of-month date_time
             false
-        FROM app.mms_sales_accounting s
+        FROM (
+            -- DISTINCT ON collapses duplicate (meter_id, monthyear) rows
+            -- within this batch's window to exactly one each BEFORE the
+            -- INSERT — live data confirmed to contain them (23M+ raw rows
+            -- with no unique constraint enforced on the source table), and
+            -- without this, ON CONFLICT DO UPDATE fails outright with
+            -- "ON CONFLICT DO UPDATE command cannot affect row a second
+            -- time" the moment two source rows for the same meter+month
+            -- land in one batch. No reliable "latest wins" signal exists
+            -- on the source table (no load timestamp column) — ctid DESC
+            -- is a deterministic, if arbitrary, tiebreaker (effectively
+            -- "last physically loaded"). Flag if a better tiebreaker
+            -- (e.g. an actual load sequence/timestamp column) becomes
+            -- available upstream.
+            SELECT DISTINCT ON (s.meter_id, s.monthyear) s.*
+            FROM app.mms_sales_accounting s
+            WHERE (s.monthyear || chr(1) || s.meter_id) > v_last_key
+              AND (s.monthyear || chr(1) || s.meter_id) <= v_batch_max_key
+            ORDER BY s.meter_id, s.monthyear, s.ctid DESC
+        ) d
         LEFT JOIN app.mms_customer_meter m
-            ON lower(trim(m.meter_number)) = lower(trim(s.meter_id))
-        WHERE (s.monthyear || chr(1) || s.meter_id) > v_last_key
-          AND (s.monthyear || chr(1) || s.meter_id) <= v_batch_max_key
+            ON lower(trim(m.meter_number)) = lower(trim(d.meter_id))
         ON CONFLICT (meter_number, date_time) DO UPDATE SET
             account_number       = EXCLUDED.account_number,
             region               = EXCLUDED.region,

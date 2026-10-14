@@ -38,17 +38,18 @@ func parseFilters(q url.Values) (FilterParams, error) {
 		to = to.AddDate(0, 0, 1).Add(-time.Microsecond)
 	}
 	return FilterParams{
-		Region:        httpx.CSV(q, "region"),
-		District:      httpx.CSV(q, "district"),
-		ContractType:  httpx.CSV(q, "contractType"),
-		Tariff:        httpx.CSV(q, "tariff"),
-		Manufacturer:  httpx.CSV(q, "manufacturer"),
-		Model:         httpx.CSV(q, "model"),
-		AccountNumber: httpx.CSV(q, "accountNumber"),
-		MeterNumber:   httpx.CSV(q, "meterNumber"),
-		Search:        q.Get("search"),
-		DateTimeFrom:  from,
-		DateTimeTo:    to,
+		Region:          httpx.CSV(q, "region"),
+		District:        httpx.CSV(q, "district"),
+		ContractType:    httpx.CSV(q, "contractType"),
+		Tariff:          httpx.CSV(q, "tariff"),
+		Manufacturer:    httpx.CSV(q, "manufacturer"),
+		Model:           httpx.CSV(q, "model"),
+		ConsumptionBand: httpx.CSV(q, "consumptionBand"),
+		AccountNumber:   httpx.CSV(q, "accountNumber"),
+		MeterNumber:     httpx.CSV(q, "meterNumber"),
+		Search:          q.Get("search"),
+		DateTimeFrom:    from,
+		DateTimeTo:      to,
 	}, nil
 }
 

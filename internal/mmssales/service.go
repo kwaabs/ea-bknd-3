@@ -26,8 +26,14 @@ func NewService(db *bun.DB) *Service { return &Service{db: db} }
 // hasRowLevelFilters reports whether the params include filters that only
 // exist on raw rows (not dimensions of the daily summary). When true,
 // aggregates must fall back to the raw table.
+//
+// ConsumptionBand is included here: app.mms_sales_daily_summary (see
+// sql/mms_customer_sales_dedup.sql's resync_mms_sales_summary) was never
+// extended with a consumption_band column — it predates
+// app.mms_sales_accounting entirely — so filtering by it can only be
+// answered against the raw table.
 func (p FilterParams) hasRowLevelFilters() bool {
-	return p.Search != "" || len(p.AccountNumber) > 0 || len(p.MeterNumber) > 0
+	return p.Search != "" || len(p.AccountNumber) > 0 || len(p.MeterNumber) > 0 || len(p.ConsumptionBand) > 0
 }
 
 // dimensionFilters applies the filters that exist on BOTH the raw table and
@@ -39,6 +45,7 @@ func dimensionFilters(q *bun.SelectQuery, p FilterParams) *bun.SelectQuery {
 	q = dbx.InLower(q, "tariff", p.Tariff)
 	q = dbx.InLower(q, "manufacturer", p.Manufacturer)
 	q = dbx.InLower(q, "model", p.Model)
+	q = dbx.InLower(q, "consumption_band", p.ConsumptionBand)
 	return q
 }
 
@@ -94,10 +101,6 @@ func detailSortColumn(sortBy string) (column string, ok bool) {
 		return "customer_name", true
 	case "sts_last_month_kwh_read":
 		return "sts_last_month_kwh_read", true
-	case "sts_last_month_credit_read":
-		return "sts_last_month_credit_read", true
-	case "sts_credit_balance_remaining":
-		return "sts_credit_balance_remaining", true
 	case "date_time":
 		return "date_time", true
 	default:
@@ -137,12 +140,13 @@ func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Paginatio
 // validGroupBy whitelists groupable columns. These are dimensions on both
 // the raw and summary tables, so grouping works identically on either path.
 var validGroupBy = map[string]bool{
-	"region":        true,
-	"district":      true,
-	"contract_type": true,
-	"tariff":        true,
-	"manufacturer":  true,
-	"model":         true,
+	"region":           true,
+	"district":         true,
+	"contract_type":    true,
+	"tariff":           true,
+	"manufacturer":     true,
+	"model":            true,
+	"consumption_band": true,
 }
 
 // Aggregate returns grouped sums/counts.
@@ -154,13 +158,21 @@ var validGroupBy = map[string]bool{
 // Both paths produce identical shapes and identical numbers for the filters
 // they share.
 func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []string) (*AggregateResult, error) {
-	rowLevel := p.hasRowLevelFilters()
-
 	var groups []string
 	for _, g := range groupBy {
 		g = strings.ToLower(strings.TrimSpace(g))
 		if validGroupBy[g] {
 			groups = append(groups, g)
+		}
+	}
+
+	// Grouping by consumption_band needs the same raw-table fallback as
+	// filtering by it (hasRowLevelFilters' comment explains why: the daily
+	// summary has no consumption_band column to group on).
+	rowLevel := p.hasRowLevelFilters()
+	for _, g := range groups {
+		if g == "consumption_band" {
+			rowLevel = true
 		}
 	}
 
@@ -171,8 +183,6 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 		q := s.base(p).
 			ColumnExpr("'MMS Sales' AS data_src").
 			ColumnExpr("COUNT(DISTINCT (account_number, meter_number)) AS customer_count").
-			ColumnExpr("COALESCE(ROUND(SUM(sts_credit_balance_remaining)::numeric, 2), 0) AS sum_credit_balance_remaining").
-			ColumnExpr("COALESCE(ROUND(SUM(sts_last_month_credit_read)::numeric, 2), 0) AS sum_last_month_credit_read").
 			ColumnExpr("COALESCE(ROUND(SUM(sts_last_month_kwh_read)::numeric, 2), 0) AS sum_last_month_kwh_read")
 		for _, g := range groups {
 			q = q.ColumnExpr(g).GroupExpr(g)
@@ -201,8 +211,6 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 	// merged by group key below.
 	q := s.summaryBase(p).
 		ColumnExpr("'MMS Sales' AS data_src").
-		ColumnExpr("COALESCE(ROUND(SUM(sum_credit_balance_remaining)::numeric, 2), 0) AS sum_credit_balance_remaining").
-		ColumnExpr("COALESCE(ROUND(SUM(sum_last_month_credit_read)::numeric, 2), 0) AS sum_last_month_credit_read").
 		ColumnExpr("COALESCE(ROUND(SUM(sum_last_month_kwh_read)::numeric, 2), 0) AS sum_last_month_kwh_read")
 	for _, g := range groups {
 		q = q.ColumnExpr(g).GroupExpr(g)

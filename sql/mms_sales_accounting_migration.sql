@@ -177,6 +177,36 @@ BEGIN
     RAISE NOTICE 'Resuming after key: %', v_last_key;
     RAISE NOTICE 'Started: %', v_started_at;
 
+    -- SECOND source of the exact same "ON CONFLICT DO UPDATE command
+    -- cannot affect row a second time" error, found live: even after
+    -- app.mms_sales_accounting's own duplicates are collapsed (below),
+    -- app.mms_customer_meter can itself hold more than one row per
+    -- meter_number (the old populate_mms_customer_sales_from_raw.sql
+    -- never had to care — it uses ON CONFLICT DO NOTHING, which tolerates
+    -- a one-to-many LEFT JOIN fanning a single source row out into
+    -- several; DO UPDATE does not). Deduped ONCE here, outside the loop
+    -- (not re-derived every batch — this dimension table doesn't change
+    -- mid-run and redoing this per batch would be pure waste), into a
+    -- plain session-temp table (NOT "ON COMMIT DROP" — each batch below
+    -- does its own COMMIT, which would otherwise wipe this out after the
+    -- very first one). Same ctid-DESC tiebreaker reasoning as the
+    -- accounting-table dedup below: no load-timestamp column exists to
+    -- pick a more meaningful "latest" row, so this falls back to
+    -- installation_date DESC (prefer the most recently installed meter
+    -- record for a given number) and then ctid DESC as the final,
+    -- arbitrary-but-deterministic tiebreaker.
+    DROP TABLE IF EXISTS _mms_meter_dedup;
+    CREATE TEMP TABLE _mms_meter_dedup AS
+    SELECT DISTINCT ON (lower(trim(meter_number))) *
+    FROM app.mms_customer_meter
+    WHERE meter_number IS NOT NULL AND trim(meter_number) <> ''
+    ORDER BY lower(trim(meter_number)), installation_date DESC NULLS LAST, ctid DESC;
+
+    CREATE INDEX ON _mms_meter_dedup (lower(trim(meter_number)));
+
+    RAISE NOTICE 'Deduped app.mms_customer_meter: % distinct meter_number(s)',
+        (SELECT COUNT(*) FROM _mms_meter_dedup);
+
     LOOP
         v_batch_started_at := clock_timestamp();
 
@@ -280,7 +310,7 @@ BEGIN
               AND (s.monthyear || chr(1) || s.meter_id) <= v_batch_max_key
             ORDER BY s.meter_id, s.monthyear, s.ctid DESC
         ) d
-        LEFT JOIN app.mms_customer_meter m
+        LEFT JOIN _mms_meter_dedup m
             ON lower(trim(m.meter_number)) = lower(trim(d.meter_id))
         ON CONFLICT (meter_number, date_time) DO UPDATE SET
             account_number       = EXCLUDED.account_number,
@@ -325,6 +355,8 @@ BEGIN
         RAISE NOTICE 'Batch complete | rows: % | total: % | cursor: % | batch time: %',
             v_batch_count, v_total_processed, v_last_key, clock_timestamp() - v_batch_started_at;
     END LOOP;
+
+    DROP TABLE IF EXISTS _mms_meter_dedup;
 
     RAISE NOTICE '==============================================';
     RAISE NOTICE 'POPULATION COMPLETE';

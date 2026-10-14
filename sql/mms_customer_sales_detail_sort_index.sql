@@ -1,0 +1,39 @@
+-- Fixes the MMS Customer Records detail table timing out / coming back
+-- empty on its default view.
+--
+-- ROOT CAUSE: internal/mmssales/service.go's Detail() defaults to
+-- ORDER BY sts_last_month_kwh_read DESC (the frontend's default sortBy,
+-- see mms-customer-sales-detail.tsx) — but app.mms_customer_sales (20M+
+-- rows) has never had an index on that column (see
+-- sql/indexes_mms_customer_sales.sql: date_time, meter_number,
+-- account_number, and a few lower() dimension indexes, nothing on
+-- sts_last_month_kwh_read). Every default page load forces a full sort
+-- of however many rows match the date range, from scratch. Under load this
+-- times out the same way the unrelated app.zeus_sales Detail endpoint was
+-- just observed timing out on its own unindexed ORDER BY
+-- billconsumptionvalue — same failure shape, same database, different
+-- table. The query failing/timing out and the frontend's "No records
+-- found" empty state are visually indistinguishable here: Detail returns
+-- an error, useMmsCustomerSalesDetail's data comes back undefined, and
+-- mms-customer-sales-detail.tsx falls back to `rows = detailData?.data ??
+-- []` with no distinct error UI — so a timeout silently renders as "0
+-- meters."
+--
+-- NOT caused by the mms_sales_accounting migration (sql/
+-- mms_sales_accounting_migration.sql) — this gap predates it. It happens
+-- to matter more now because that migration's rows are monthly-grain
+-- (one date_time per meter per month), which is exactly the shape this
+-- index serves best: within a single requested month, nearly every
+-- matching row shares the same date_time, so (date_time,
+-- sts_last_month_kwh_read) lets Postgres return rows already in
+-- sts_last_month_kwh_read order within that one date_time value, with no
+-- separate sort step.
+--
+-- CONCURRENTLY: this table is confirmed live with active traffic
+-- (sql/mms_customer_sales_dedup.sql's own comments say the same) and
+-- large (20M+ rows) — a plain CREATE INDEX would hold a long write lock
+-- while it builds. Run this exact statement by itself; CONCURRENTLY
+-- cannot run inside a transaction block, so it can't be combined with
+-- other statements in one script/transaction.
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_mms_customer_sales_date_time_kwh
+    ON app.mms_customer_sales (date_time, sts_last_month_kwh_read DESC);

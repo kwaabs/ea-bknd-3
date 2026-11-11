@@ -310,17 +310,18 @@ func (s *Service) Detail(ctx context.Context, p FilterParams, pg httpx.Paginatio
 
 // validGroupBy whitelists groupable columns.
 var validGroupBy = map[string]bool{
-	"regionname":         true,
-	"districtname":       true,
-	"tariffclasscode":    true,
-	"tariffclassname":    true,
-	"serviceclass":       true,
-	"accounttype":        true,
-	"billstatus":         true,
-	"metermodeltype":     true,
-	"servicepointstatus": true,
-	"billingyear":        true,
-	"billingmonth":       true,
+	"regionname":          true,
+	"districtname":        true,
+	"tariffclasscode":     true,
+	"tariffclassname":     true,
+	"serviceclass":        true,
+	"accounttype":         true,
+	"billstatus":          true,
+	"metermodeltype":      true,
+	"servicepointstatus":  true,
+	"billingyear":         true,
+	"billingmonth":        true,
+	"billconsumptiontype": true,
 }
 
 // Aggregate returns grouped sums/counts. Sums and customer_count run as two
@@ -367,7 +368,18 @@ func (s *Service) Aggregate(ctx context.Context, p FilterParams, groupBy []strin
 		}
 	}
 
+	// Grouping by billconsumptiontype needs the same raw-table fallback as
+	// a row-level filter: neither app.zeus_sales_period_summary nor
+	// app.zeus_customer_roster has this column (it's a per-reading
+	// attribute — Actual/Estimated/No-reading — not a dimension either
+	// summary table was ever built with), so a summary-path GROUP BY on
+	// it would fail outright. Same pattern as mmssales' consumption_band.
 	rowLevel := p.hasRowLevelFilters()
+	for _, g := range groups {
+		if g == "billconsumptiontype" {
+			rowLevel = true
+		}
+	}
 
 	var data []AggregateRow
 	var counts []AggregateRow
@@ -578,6 +590,8 @@ func aggregateGroupKey(r AggregateRow, groups []string) string {
 			vals[i] = strconv.Itoa(r.BillingYear)
 		case "billingmonth":
 			vals[i] = strconv.Itoa(r.BillingMonth)
+		case "billconsumptiontype":
+			vals[i] = r.BillConsumptionType
 		}
 	}
 	return strings.Join(vals, "\x00")

@@ -14,14 +14,19 @@
 -- EXISTING columns during the transform step (step 2, not this file) —
 -- only debt_age, bills, and accountgroups' type need anything here.
 
--- 1. debt_age: new field entirely. The new feed sends it as a nested
+-- 1. debtage: new field entirely. The new feed sends it as a nested
 --    object (month0..month24, moreThan24Months) — stored as jsonb as-is
 --    rather than normalized into 26 separate columns, since nothing
 --    reads it yet and jsonb keeps every bucket queryable later
---    (debt_age->>'month3', etc.) without a schema change if/when
---    reporting on it is actually wanted.
+--    (debtage->>'month3', etc.) without a schema change if/when
+--    reporting on it is actually wanted. Named without an underscore
+--    (not debt_age) to match every other column on this table — all
+--    lowercase, no underscores (billconsumptionvalue, lastpaymentamount,
+--    etc.). If an earlier version of this script already ran and
+--    created debt_age, rename it instead:
+--      ALTER TABLE app.zeus_sales_working RENAME COLUMN debt_age TO debtage;
 ALTER TABLE app.zeus_sales_working
-    ADD COLUMN IF NOT EXISTS debt_age jsonb;
+    ADD COLUMN IF NOT EXISTS debtage jsonb;
 
 -- 2. bills: new field entirely, empty array in both samples seen so far,
 --    purpose not yet confirmed. Stored as jsonb for the same reason —

@@ -158,6 +158,7 @@ type AggregateRow struct {
 	ServicePointStatus      string  `bun:"servicepointstatus" json:"servicepointstatus,omitempty"`
 	BillingYear             int     `bun:"billingyear" json:"billingyear,omitempty"`
 	BillingMonth            int     `bun:"billingmonth" json:"billingmonth,omitempty"`
+	BillConsumptionType     string  `bun:"billconsumptiontype" json:"billconsumptiontype,omitempty"`
 	CustomerCount           int64   `bun:"customer_count" json:"customer_count"`
 	SumBillAmount           float64 `bun:"sum_billamount" json:"sum_billamount"`
 	SumAmountDue            float64 `bun:"sum_amountdue" json:"sum_amountdue"`

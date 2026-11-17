@@ -17,16 +17,24 @@
 -- migration cursor (see below for why).
 --
 -- CURSOR DECISION (important, discussed before building this): a random
--- uuid cannot serve as an incremental cursor the way the old sequential
--- int8 id did — gen_random_uuid() has no relationship to insertion
--- order, so "WHERE id > last_checkpoint" would silently skip rows
--- forever whenever a new row's generated uuid happens to sort before an
--- already-processed one. Step 3's transform will instead use
--- (updated_at, "_id") as a keyset cursor — updated_at is a real,
--- meaningful "when was this last touched" timestamp the feed actually
--- provides, same role DATE_TIME/METER_SERIAL_NUMBER played for the old
--- MMS_SALES keyset pagination. The composite index below exists for
--- exactly that cursor.
+-- uuid cannot serve as an incremental cursor BY ITSELF the way the old
+-- sequential int8 id did — gen_random_uuid() has no relationship to
+-- insertion order, so "WHERE id > last_checkpoint" would silently skip
+-- rows forever whenever a new row's generated uuid happens to sort
+-- before an already-processed one. id is only ever used as a tiebreaker
+-- alongside loaded_at below, where meaningful ordering doesn't matter —
+-- it only needs to be unique.
+--
+-- Step 3's transform originally used (updated_at, "_id") instead —
+-- updated_at seemed like the more meaningful choice, a real "when was
+-- this last touched" timestamp. That broke the first time a backfill for
+-- an EARLIER billing period was loaded after processing had already
+-- moved past a LATER one: the backfilled rows' updated_at was older than
+-- the checkpoint, so they were silently skipped forever. loaded_at
+-- doesn't have that failure mode — any load, live or a backfill for any
+-- past period, happens "now," always after whatever the checkpoint
+-- currently is. See sql/zeus_sales_feed_to_working_transform.sql's own
+-- doc comment for the full story.
 --
 -- No unique constraint on "_id": restaging still applies (confirmed) —
 -- the same bill can land again later under the same "_id" with a new
@@ -101,12 +109,18 @@ CREATE TABLE IF NOT EXISTS app.zeus_sales_feed (
     "__v"                            int4,
     debtage                          jsonb,  -- matches zeus_sales_working's debtage column name (step 1)
     slt_status                       text,
-    loaded_at                        timestamptz NOT NULL DEFAULT now()  -- bookkeeping only: when THIS row landed here, not used by the transform's cursor
+    loaded_at                        timestamptz NOT NULL DEFAULT now()  -- when THIS row landed here — step 3's transform cursor (see sql/zeus_sales_feed_to_working_transform.sql)
 );
 
--- Supports the (updated_at, "_id") keyset cursor step 3's transform will
--- use, same role idx_mms_sales_accounting_monthyear/meter_id played for
--- the MMS migration.
+-- Supports the (loaded_at, id) keyset cursor step 3's transform uses,
+-- same role idx_mms_sales_accounting_monthyear/meter_id played for the
+-- MMS migration.
+CREATE INDEX IF NOT EXISTS idx_zeus_sales_feed_loaded_at_id
+    ON app.zeus_sales_feed (loaded_at, id);
+
+-- Kept for lookups by updated_at alone (diagnostics, the kind of
+-- "is new data actually here yet" checks this session's backfill
+-- incident needed) — no longer the transform's cursor.
 CREATE INDEX IF NOT EXISTS idx_zeus_sales_feed_updated_at_id
     ON app.zeus_sales_feed (updated_at, "_id");
 

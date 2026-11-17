@@ -24,9 +24,15 @@
 -- incorrectly win that tiebreak over real, older data. So this procedure
 -- assigns real, strictly-increasing id values itself: it reads the
 -- current MAX(id) once before the loop starts, then hands out
--- sequential values continuing from there, in (updated_at, "_id") order
--- — so a later-updated bill always gets a higher id, preserving the
+-- sequential values continuing from there, in (loaded_at, id) order — so
+-- a more-recently-LOADED bill always gets a higher id, preserving the
 -- "highest id = most recent" property the downstream dedup relies on.
+-- This is actually a better match for that property's intent than the
+-- original (updated_at, "_id") order was: "most recently staged" should
+-- mean most recently loaded, not whatever timestamp happens to be on the
+-- bill's own content — a backfilled reload of an old bill is a fresher
+-- version of it and should win the tiebreak, regardless of its content's
+-- own updated_at.
 --
 -- ASSUMPTION worth flagging: this only holds if nothing else is
 -- concurrently inserting into zeus_sales_working while this runs (e.g.
@@ -35,14 +41,27 @@
 -- collide. Expected to be fine given the old feed is being retired, not
 -- run alongside this one, but flagging it rather than assuming silently.
 --
--- CURSOR: (updated_at, "_id") keyset pagination — a real row-value tuple
--- comparison, not a packed string this time (migration_checkpoints
--- already has separate last_timestamp/last_text columns for exactly
--- this shape, same as the original populate_mms_customer_sales_from_raw
--- procedure's (DATE_TIME, METER_SERIAL_NUMBER) cursor). A NULL updated_at
--- (shouldn't happen — not seen in any sample — but the column allows it)
--- is coalesced to '-infinity' so such a row is never silently skipped by
--- the ">" comparison rather than just appearing "oldest."
+-- CURSOR: (loaded_at, id) keyset pagination — loaded_at (zeus_sales_feed's
+-- own bookkeeping column, stamped by Postgres at INSERT time into THIS
+-- table) not updated_at (the feed's source-side "when Zeus last touched
+-- this record" timestamp). Originally built on (updated_at, "_id")
+-- instead, which seemed like the more "meaningful" choice at the time —
+-- but it broke the very first time a backfill for an EARLIER billing
+-- period was loaded after a LATER one had already been processed: the
+-- backfilled rows' updated_at was older than the checkpoint, so the
+-- ">" comparison silently skipped every one of them (confirmed live:
+-- 3.19M September rows sitting below an October checkpoint, "0
+-- processed" with no error). loaded_at doesn't have this failure mode —
+-- any INSERT, whether live current-month data or a backfill for a
+-- period years in the past, happens "now," so it's always greater than
+-- whatever the checkpoint currently is, regardless of which billing
+-- period the data is actually for. id is zeus_sales_feed's own uuid PK
+-- (globally unique, real primary key) — not ordered in any meaningful
+-- sense (gen_random_uuid()), but that's fine here: it only needs to
+-- break ties when two rows share the same loaded_at (realistic under a
+-- bulk load, since loaded_at's DEFAULT now() is the transaction-start
+-- timestamp, constant across one bulk INSERT statement), and any total
+-- order works for that, meaningful or not.
 CREATE OR REPLACE PROCEDURE app.migrate_zeus_sales_feed_to_working(
     IN p_batch_size integer DEFAULT 10000,
     IN p_reset boolean DEFAULT false
@@ -50,41 +69,42 @@ CREATE OR REPLACE PROCEDURE app.migrate_zeus_sales_feed_to_working(
  LANGUAGE plpgsql
 AS $procedure$
 DECLARE
-    v_last_updated_at      timestamptz;
-    v_last_id              text;
-    v_batch_max_updated_at timestamptz;
-    v_batch_max_id         text;
+    v_last_loaded_at      timestamptz;
+    v_last_id             uuid;
+    v_batch_max_loaded_at timestamptz;
+    v_batch_max_id        uuid;
     v_batch_count          bigint;
     v_next_id              bigint;
     v_total_processed      bigint := 0;
     v_started_at           timestamptz := clock_timestamp();
     v_batch_started_at     timestamptz;
     v_proc_name constant text := 'migrate_zeus_sales_feed_to_working';
+    v_nil_uuid constant uuid := '00000000-0000-0000-0000-000000000000';
 BEGIN
     IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
         RAISE EXCEPTION 'p_batch_size must be greater than zero';
     END IF;
 
     IF p_reset THEN
-        v_last_updated_at := '-infinity';
-        v_last_id := '';
+        v_last_loaded_at := '-infinity';
+        v_last_id := v_nil_uuid;
         INSERT INTO app.migration_checkpoints (procedure_name, last_timestamp, last_text, updated_at)
-        VALUES (v_proc_name, v_last_updated_at, v_last_id, clock_timestamp())
+        VALUES (v_proc_name, v_last_loaded_at, v_last_id::text, clock_timestamp())
         ON CONFLICT (procedure_name)
-        DO UPDATE SET last_timestamp = v_last_updated_at, last_text = v_last_id, updated_at = clock_timestamp();
+        DO UPDATE SET last_timestamp = v_last_loaded_at, last_text = v_last_id::text, updated_at = clock_timestamp();
     ELSE
-        SELECT last_timestamp, last_text INTO v_last_updated_at, v_last_id
+        SELECT last_timestamp, last_text::uuid INTO v_last_loaded_at, v_last_id
         FROM app.migration_checkpoints
         WHERE procedure_name = v_proc_name;
 
         IF NOT FOUND THEN
-            v_last_updated_at := '-infinity';
-            v_last_id := '';
+            v_last_loaded_at := '-infinity';
+            v_last_id := v_nil_uuid;
             INSERT INTO app.migration_checkpoints (procedure_name, last_timestamp, last_text)
-            VALUES (v_proc_name, v_last_updated_at, v_last_id);
+            VALUES (v_proc_name, v_last_loaded_at, v_last_id::text);
         ELSE
-            v_last_updated_at := COALESCE(v_last_updated_at, '-infinity');
-            v_last_id := COALESCE(v_last_id, '');
+            v_last_loaded_at := COALESCE(v_last_loaded_at, '-infinity');
+            v_last_id := COALESCE(v_last_id, v_nil_uuid);
         END IF;
     END IF;
 
@@ -94,7 +114,7 @@ BEGIN
     RAISE NOTICE 'ZEUS SALES FEED -> WORKING';
     RAISE NOTICE '==============================================';
     RAISE NOTICE 'Batch size: %', p_batch_size;
-    RAISE NOTICE 'Resuming after (updated_at, _id): (%, %)', v_last_updated_at, v_last_id;
+    RAISE NOTICE 'Resuming after (loaded_at, id): (%, %)', v_last_loaded_at, v_last_id;
     RAISE NOTICE 'Continuing zeus_sales_working.id from: %', v_next_id;
     RAISE NOTICE 'Started: %', v_started_at;
 
@@ -102,17 +122,17 @@ BEGIN
         v_batch_started_at := clock_timestamp();
 
         WITH batch AS (
-            SELECT f.updated_at, f."_id"
+            SELECT f.loaded_at, f.id
             FROM app.zeus_sales_feed f
-            WHERE (COALESCE(f.updated_at, '-infinity'), f."_id") > (v_last_updated_at, v_last_id)
-            ORDER BY COALESCE(f.updated_at, '-infinity'), f."_id"
+            WHERE (f.loaded_at, f.id) > (v_last_loaded_at, v_last_id)
+            ORDER BY f.loaded_at, f.id
             LIMIT p_batch_size
         )
         SELECT
             COUNT(*),
-            (SELECT COALESCE(updated_at, '-infinity') FROM batch ORDER BY COALESCE(updated_at, '-infinity') DESC, "_id" DESC LIMIT 1),
-            (SELECT "_id" FROM batch ORDER BY COALESCE(updated_at, '-infinity') DESC, "_id" DESC LIMIT 1)
-        INTO v_batch_count, v_batch_max_updated_at, v_batch_max_id
+            (SELECT loaded_at FROM batch ORDER BY loaded_at DESC, id DESC LIMIT 1),
+            (SELECT id FROM batch ORDER BY loaded_at DESC, id DESC LIMIT 1)
+        INTO v_batch_count, v_batch_max_loaded_at, v_batch_max_id
         FROM batch;
 
         IF v_batch_count = 0 THEN
@@ -187,7 +207,7 @@ BEGIN
             bills
         )
         SELECT
-            v_next_id + (ROW_NUMBER() OVER (ORDER BY COALESCE(f.updated_at, '-infinity'), f."_id")),
+            v_next_id + (ROW_NUMBER() OVER (ORDER BY f.loaded_at, f.id)),
             f."_id",
             f.bill,
             f.bill_type,
@@ -253,31 +273,31 @@ BEGIN
             f.debtage,
             f.bills
         FROM app.zeus_sales_feed f
-        WHERE (COALESCE(f.updated_at, '-infinity'), f."_id") > (v_last_updated_at, v_last_id)
-          AND (COALESCE(f.updated_at, '-infinity'), f."_id") <= (v_batch_max_updated_at, v_batch_max_id);
+        WHERE (f.loaded_at, f.id) > (v_last_loaded_at, v_last_id)
+          AND (f.loaded_at, f.id) <= (v_batch_max_loaded_at, v_batch_max_id);
 
         v_next_id := v_next_id + v_batch_count;
-        v_last_updated_at := v_batch_max_updated_at;
+        v_last_loaded_at := v_batch_max_loaded_at;
         v_last_id := v_batch_max_id;
         v_total_processed := v_total_processed + v_batch_count;
 
         UPDATE app.migration_checkpoints
-        SET last_timestamp = v_last_updated_at,
-            last_text = v_last_id,
+        SET last_timestamp = v_last_loaded_at,
+            last_text = v_last_id::text,
             updated_at = clock_timestamp()
         WHERE procedure_name = v_proc_name;
 
         COMMIT;
 
         RAISE NOTICE 'Batch complete | rows: % | total: % | cursor: (%, %) | next id: % | batch time: %',
-            v_batch_count, v_total_processed, v_last_updated_at, v_last_id, v_next_id, clock_timestamp() - v_batch_started_at;
+            v_batch_count, v_total_processed, v_last_loaded_at, v_last_id, v_next_id, clock_timestamp() - v_batch_started_at;
     END LOOP;
 
     RAISE NOTICE '==============================================';
     RAISE NOTICE 'TRANSFORM COMPLETE';
     RAISE NOTICE '==============================================';
     RAISE NOTICE 'Total processed this run: %', v_total_processed;
-    RAISE NOTICE 'Checkpoint cursor: (%, %)', v_last_updated_at, v_last_id;
+    RAISE NOTICE 'Checkpoint cursor: (%, %)', v_last_loaded_at, v_last_id;
     RAISE NOTICE 'Total elapsed: %', clock_timestamp() - v_started_at;
 END;
 $procedure$
